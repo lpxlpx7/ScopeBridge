@@ -135,20 +135,38 @@ Profile inspect(const QString &file, const QString &mapRoot) {
             if (index >= 0 && index < list.size()) ids << list.at(index).toString();
             else p.warnings << QString("STARS map number %1 is out of range.").arg(number.toInt());
         }
+        if (ids.isEmpty() && !list.isEmpty()) {
+            // Some saved CRC profiles have stale map numbers, or no map selected at all.
+            // Keep the facility's available maps rather than inventing an active selection.
+            p.warnings << "No saved STARS map resolves; including all maps offered by " + ancestor + ".";
+            for (const auto &id : list) ids << id.toString();
+        }
+        if (ids.isEmpty()) {
+            const auto f = byId.value(p.facility);
+            const QString cab = f.value("towerCabConfiguration").toObject().value("videoMapId").toString();
+            if (!cab.isEmpty()) {
+                p.warnings << "No STARS maps configured; using the " + p.facility + " tower-cab map.";
+                ids << cab;
+            }
+        }
     } else {
         const auto f = byId.value(p.facility);
         const QString type = p.view.value("$type").toString();
+        const QString saidMap = f.value("saidConfiguration").toObject()
+                                    .value("saabConfiguration").toObject().value("videoMapId").toString();
         if (type.contains("SaabSaid", Qt::CaseInsensitive)) {
-            const auto id = f.value("saidConfiguration").toObject().value("saabConfiguration").toObject().value("videoMapId").toString();
-            if (!id.isEmpty()) ids << id;
+            if (!saidMap.isEmpty()) ids << saidMap;
         } else {
             const QString key = type.contains("Asdex", Qt::CaseInsensitive) ? "asdexConfiguration" : "towerCabConfiguration";
             const auto id = f.value(key).toObject().value("videoMapId").toString();
             if (!id.isEmpty()) ids << id;
+            // Some CRC ASDEX displays (e.g. ZOA/SMF) use a Saab SAID map instead.
+            if (ids.isEmpty() && type.contains("Asdex", Qt::CaseInsensitive) && !saidMap.isEmpty()) ids << saidMap;
         }
         if (ids.isEmpty()) p.warnings << "No video map is configured for this display.";
     }
     ids.removeDuplicates();
+    if (ids.isEmpty()) p.warnings << "No compatible video map IDs are configured for this profile.";
     for (const auto &id : ids) {
         if (id.isEmpty()) continue;
         const QString path = mapPath(mapRoot, p.artcc, id);

@@ -13,6 +13,8 @@ Packages are saved in `~/ScopeBridge-Output/<ARTCC>_<profile>/` by default. You 
 
 The output contains a `.sct` with the selected video-map outlines in `[GEO]`, an `.asr` with the CRC display's view and a `.prf` that references both. CRC profiles and video maps alone do **not** contain all navigation, runway, positions, settings and plugin data in the full ZME example package. Thus the output is a functional map sector package, not a byte-for-byte reproduction of the ZME example. Point symbols, text, fills and CRC-specific styles are not converted; polygon boundaries are drawn as lines.
 
+The converter supports any ARTCC with local CRC facility and VideoMaps data. Some ASDEX displays, including SMF in ZOA, use the facility's SAID video map. If a saved STARS map number is stale or no maps are selected, ScopeBridge includes all maps offered by that facility and reports the fallback in the app; a facility without STARS maps can fall back to its tower-cab map. These fallbacks may create a large sector file and do not represent the profile's exact original map selection.
+
 ## Build from source
 
 Requires CMake 3.21+, Qt 6 Widgets and a matching C++17 compiler. For Qt 6.11.2 and MinGW installed under `I:\Qt`, run from this directory in PowerShell:
