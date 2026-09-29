@@ -1,0 +1,17 @@
+--- a/plugin/src/CANGroundRender.cpp
++++ b/plugin/src/CANGroundRender.cpp
+@@ -1449,11 +1449,11 @@
+             LayerStyle custom = *st;
+             auto overrideColor = m_colors.find(L.id);
+             if (overrideColor != m_colors.end()) {
+-                custom.line = custom.fill = overrideColor->second;
+-                custom.hasLine = true;
++                if (custom.hasLine) custom.line = overrideColor->second;
++                if (custom.hasFill) custom.fill = overrideColor->second;
+             }
+-            drawLines(tgt, L, custom);
++            drawLayer(tgt, L, custom, pxPerM, labels);
+ #else
+-            drawLines(tgt, L, *st);
++            drawLayer(tgt, L, *st, pxPerM, labels);
+ #endif
