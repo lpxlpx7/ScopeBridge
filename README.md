@@ -1,31 +1,37 @@
 # ScopeBridge
 
-ScopeBridge turns a CRC profile and its GeoJSON video maps into EuroScope sector files. The Windows release includes `ScopeBridge.exe` and the Qt runtime files it needs.
+ScopeBridge converts a CRC profile and GeoJSON video maps into a EuroScope package using **Jurina's Renderer**. The Windows release folder contains `ScopeBridge.exe`, the Qt runtime, a precompiled 32-bit `JurinasRenderer.dll`, TopSky files, and the example EuroScope symbology preset.
 
-## Use the Windows app
+## Use
 
-1. Open `ScopeBridge.exe` in the **release folder**. Keep its accompanying DLLs and `platforms` folder beside the exe.
-2. Browse to one CRC profile `.json` (usually under `%LOCALAPPDATA%\CRC\Profiles`).
-3. Choose the CRC `VideoMaps` folder (or its ARTCC subfolder, such as `VideoMaps\ZME`).
-4. Click **Generate EuroScope sector**. The output folder opens automatically. Open the generated `.prf` in EuroScope.
+1. Unzip the whole `ScopeBridge-Windows-x64.zip` archive and launch `ScopeBridge.exe` (keep `assets/`, the Qt DLLs and `platforms/` beside the executable).
+2. Choose a CRC profile `.json` and its `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
+3. Optionally choose a **Base sector** `.sct` to preserve navigation, airports, runways and other non-GEO sections. If omitted, the sector only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
+4. Click **Preview maps** to see which are initially **ON** and which available maps start **OFF**. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope.
 
-Packages are saved in `~/ScopeBridge-Output/<ARTCC>_<profile>/` by default. You can change the output folder in the app. The converter automatically finds the facility definition under `CRC/ARTCCs` alongside the profile or VideoMaps folders, or in the local CRC installation. The original CRC files are not modified. **Preview maps** is optional.
+The output folder contains:
 
-The output contains a `.sct` with the selected video-map outlines in `[GEO]`, an `.asr` with the CRC display's view and a `.prf` that references both. CRC profiles and video maps alone do **not** contain all navigation, runway, positions, settings and plugin data in the full ZME example package. Thus the output is a functional map sector package, not a byte-for-byte reproduction of the ZME example. Point symbols, text, fills and CRC-specific styles are not converted; polygon boundaries are drawn as lines.
+- `.prf` loading Jurina's Renderer, TopSky, EuroScope symbology, voice and profile settings;
+- `.asr` with the display view and active renderer layers;
+- `.sct` (the source base sector without obsolete `[GEO]` sections, or minimal `[INFO]`);
+- `.ese` generated from the ARTCC position/frequency records;
+- `Settings/Voice.txt`, `Settings/Profile.txt`, `Settings/Symbology.txt`;
+- `Plugins/JurinasRenderer/{JurinasRenderer.dll,ground.json,style.json}` and `Plugins/TopSky/`.
 
-The converter supports any ARTCC with local CRC facility and VideoMaps data. Some ASDEX displays, including SMF in ZOA, use the facility's SAID video map. If a saved STARS map number is stale or no maps are selected, ScopeBridge includes all maps offered by that facility and reports the fallback in the app; a facility without STARS maps can fall back to its tower-cab map. These fallbacks may create a large sector file and do not represent the profile's exact original map selection.
+The renderer displays each available video map in its layer panel; the saved profile selection starts visible and other maps start hidden. GeoJSON line and polygon geometry (including filled polygons) is converted from longitude/latitude into the renderer's latitude/longitude format. The bundled renderer is built from the sibling `plugin/src/CANGroundRender.cpp` with world-layer polygon drawing enabled. `style.json` uses the source feature colors when provided and the ZME example's video color for uncolored features. CRC-only symbols and text cannot be recreated from these features. The TopSky visual theme comes from the ZME example; its Japan-specific airspace file is replaced with an empty placeholder so RJxx rules are not applied to another ARTCC. The symbology preset is likewise the ZME example's palette, not a CRC-specific export.
 
-## Build from source
+Generated `.ese` positions and frequencies come from CRC facility data; position coordinates use the selected profile view center because CRC positions do not supply per-position coordinates. CRC profile/map data cannot reproduce the full original ZME package's external NAV/TopSky/other-plugin setup. Source files are never changed.
 
-Requires CMake 3.21+, Qt 6 Widgets and a matching C++17 compiler. For Qt 6.11.2 and MinGW installed under `I:\Qt`, run from this directory in PowerShell:
+## Build
+
+Build the Qt 6 / C++17 app using the MinGW toolchain compatible with your Qt installation. The project includes only its own source; package assets are copied from the surrounding Jurinas Renderer workspace. On the current development machine:
 
 ```powershell
 $env:PATH="I:\Qt\Tools\mingw1310_64\bin;I:\Qt\6.11.2\mingw_64\bin;$env:PATH"
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="I:/Qt/6.11.2/mingw_64" -DCMAKE_C_COMPILER="I:/Qt/Tools/mingw1310_64/bin/gcc.exe" -DCMAKE_CXX_COMPILER="I:/Qt/Tools/mingw1310_64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="I:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
-cmake --build build --config Release
-& "I:\Qt\6.11.2\mingw_64\bin\windeployqt.exe" --release --compiler-runtime --dir "build\release" "build\ScopeBridge.exe"
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="I:/Qt/6.11.2/mingw_64" -DCMAKE_CXX_COMPILER="I:/Qt/Tools/mingw1310_64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="I:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
+cmake --build build
 ```
 
-Copy `ScopeBridge.exe` into `build/release` before distributing that folder (or use the prebuilt release folder). Qt is dynamically linked, so copying only the exe does not create a standalone app.
+The renderer DLL must be built **as x86** using `plugin/build.bat` in a Visual Studio x86 Native Tools environment; the Qt GUI is x64. Copy the resulting `plugin/bin/JurinasRenderer.dll` to `build/release/assets/JurinasRenderer.dll`, and the workspace's `ZME/Plugins/TopSky` and `ZME/Settings/Symbology.txt` to `build/release/assets/TopSky` and `build/release/assets/Symbology.txt`. Deploy Qt with `windeployqt` and copy `build/ScopeBridge.exe` into `build/release` before distributing that directory. The app reports a missing asset rather than silently creating a broken PRF.
 
-For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct]`. If a base `.sct` is supplied, its non-`[GEO]` sections are preserved and its `[GEO]` maps are replaced. The GUI requires only the profile and VideoMaps locations.
+For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct]`.
