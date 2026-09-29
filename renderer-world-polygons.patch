@@ -1,6 +1,33 @@
 --- a/plugin/src/CANGroundRender.cpp
 +++ b/plugin/src/CANGroundRender.cpp
-@@ -1449,11 +1449,11 @@
+@@ -1245,4 +1245,10 @@
+ class GroundScreen : public CRadarScreen {
+ public:
+-    GroundScreen() {}
++    GroundScreen() {
++        // Defaults must already be in place for the first radar refresh, even
++        // if EuroScope has not called OnAsrContentLoaded yet.
++        for (const MapLayer& layer : g_data.world) m_off[layer.id] = !layer.visibleDefault;
++        for (const AirportField& airport : g_data.airports)
++            for (const MapLayer& layer : airport.layers) m_off[layer.id] = !layer.visibleDefault;
++    }
+     virtual ~GroundScreen() { discardBlit(); }
+@@ -1326,6 +1332,7 @@
+         // per-layer switches, keyed with the new prefix; legacy GroundMap_
+         // keys are honoured so existing ASRs keep working after the swap.
++        m_off.clear();
+         for (size_t i = 0; i < g_data.world.size(); ++i) {
+             const std::string& id = g_data.world[i].id;
+-            if (!g_data.world[i].visibleDefault) m_off[id] = true;
++            m_off[id] = !g_data.world[i].visibleDefault;
+             const char* v = GetDataFromAsr((std::string(ASR_PREFIX) + id).c_str());
+@@ -1340,4 +1346,4 @@
+                 const char* v = GetDataFromAsr((std::string(ASR_PREFIX) + id).c_str());
+                 if (!v || !*v) v = GetDataFromAsr((std::string(LEGACY_PREFIX) + id).c_str());
+-                if (v && *v) m_off[id] = (atoi(v) == 0);
++                m_off[id] = v && *v ? (atoi(v) == 0) : !g_data.airports[i].layers[j].visibleDefault;
+ #ifdef JURINAS_RENDERER
+@@ -1449,10 +1455,10 @@
              LayerStyle custom = *st;
              auto overrideColor = m_colors.find(L.id);
              if (overrideColor != m_colors.end()) {
@@ -15,3 +42,24 @@
 -            drawLines(tgt, L, *st);
 +            drawLayer(tgt, L, *st, pxPerM, labels);
  #endif
+@@ -1549,7 +1555,17 @@
+             std::string id = layer.id;
+             std::string name = layer.name.empty() ? id : layer.name;
+-            if (name.size() > 23) name.resize(23);
++            // Win32 TextOutA interprets UTF-8 map labels as ANSI and slicing
++            // by bytes can split a multibyte character. Use UTF-16 instead.
++            int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
++                                             name.c_str(), (int)name.size(), NULL, 0);
++            std::wstring label;
++            if (chars > 0) {
++                label.resize((size_t)chars);
++                MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
++                                    name.c_str(), (int)name.size(), &label[0], chars);
++            } else label.assign(name.begin(), name.end());
++            if (label.size() > 23) { label.resize(20); label += L"..."; }
+             SetTextColor(dc, isOff(id) ? RGB(130, 137, 148) : RGB(215, 228, 245));
+             TextOutA(dc, left + 8, y + 3, isOff(id) ? "[ ]" : "[x]", 3);
+-            TextOutA(dc, left + 38, y + 3, name.c_str(), (int)name.size());
++            TextOutW(dc, left + 38, y + 3, label.c_str(), (int)label.size());
+             RGBA color = layerColor(layer);
+             HBRUSH swatch = CreateSolidBrush(RGB((int)(color.r * 255),

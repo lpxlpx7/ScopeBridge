@@ -76,6 +76,20 @@ QString safe(QString name) {
     name = name.left(70);
     return name.isEmpty() ? "Profile" : name;
 }
+QString readableMapName(QString raw, const QString &facility, int number) {
+    if (raw.isEmpty() || QRegularExpression("^[0-9A-HJKMNP-TV-Z]{20,}$").match(raw).hasMatch())
+        return facility + " Video Map " + QString::number(number);
+    raw.replace('_', ' ');
+    raw.replace(QRegularExpression("\\s+"), " ");
+    raw = raw.trimmed();
+    // CRC's ERAM labels often prepend the facility/group and a filter slot.
+    raw.remove(QRegularExpression("^[A-Za-z0-9]+\\s+[A-Za-z0-9]+\\s+F\\d+B\\d+\\s+", QRegularExpression::CaseInsensitiveOption));
+    if (raw.isEmpty()) return facility + " Video Map " + QString::number(number);
+    // The panel is narrow; keep the meaningful suffix (usually the chart
+    // name) instead of a repeated facility prefix.
+    if (raw.size() > 20 && raw.startsWith(facility + " ", Qt::CaseInsensitive)) raw = raw.mid(facility.size() + 1);
+    return raw;
+}
 void facilities(const QJsonObject &f, QHash<QString, QJsonObject> &byId,
                 QHash<QString, QString> &positions, QHash<QString, QString> &parents,
                 const QString &parent = {}) {
@@ -138,6 +152,7 @@ Profile inspect(const QString &file, const QString &mapRoot) {
     p.facility = positions.value(p.view.value("PositionId").toString(), p.view.value("FacilityId").toString());
     p.display = p.view.value("$type").toString().section('.', -1).section(',', 0, 0);
     QStringList ids;
+    QStringList geoGroupIds;
     const QString geo = p.view.value("ActiveGeoMap").toString();
     if (!geo.isEmpty()) {
         bool matched = false;
@@ -145,11 +160,32 @@ Profile inspect(const QString &file, const QString &mapRoot) {
             const auto group = entry.toObject();
             if (group.value("name").toString() == geo) {
                 matched = true;
-                for (const auto &id : group.value("videoMapIds").toArray()) ids << id.toString();
+                for (const auto &id : group.value("videoMapIds").toArray()) geoGroupIds << id.toString();
                 break;
             }
         }
-        if (!matched || ids.isEmpty()) p.warnings << "Active ERAM geo group was not found or is empty: " + geo;
+        const auto filter = p.view.value("MapFilters").toString();
+        const auto re = QRegularExpression("\\bMap(\\d+)\\b", QRegularExpression::CaseInsensitiveOption);
+        auto matches = re.globalMatch(filter);
+        QSet<int> activeFilters;
+        while (matches.hasNext()) {
+            activeFilters.insert(matches.next().captured(1).toInt());
+        }
+        if (!matched || geoGroupIds.isEmpty()) p.warnings << "Active ERAM geo group was not found or is empty: " + geo;
+        // ERAM MapFilters refer to feature 'filters' numbers, not the position
+        // in geoMaps.videoMapIds (ZLA has Map11 with only one videoMapId).
+        for (const auto &id : geoGroupIds) {
+            const QString path = mapPath(mapRoot, p.artcc, id);
+            if (!QFileInfo::exists(path)) continue;
+            const auto features = json(path).value("features").toArray();
+            bool enabled = false;
+            for (const auto &feature : features) {
+                for (const auto &number : feature.toObject().value("properties").toObject().value("filters").toArray())
+                    if (activeFilters.contains(number.toInt())) { enabled = true; break; }
+                if (enabled) break;
+            }
+            if (enabled) ids << id;
+        }
     } else if (p.view.value("$type").toString().contains("Stars", Qt::CaseInsensitive)) {
         auto list = byId.value(p.facility).value("starsConfiguration").toObject().value("videoMapIds").toArray();
         QString ancestor = p.facility;
@@ -164,17 +200,14 @@ Profile inspect(const QString &file, const QString &mapRoot) {
             else p.warnings << QString("STARS map number %1 is out of range.").arg(number.toInt());
         }
         if (ids.isEmpty() && !list.isEmpty()) {
-            // Some saved CRC profiles have stale map numbers, or no map selected at all.
-            // Keep the facility's available maps rather than inventing an active selection.
-            p.warnings << "No saved STARS map resolves; including all maps offered by " + ancestor + ".";
-            for (const auto &id : list) ids << id.toString();
+            // Stale or empty selections must not silently turn every map on.
+            p.warnings << "No saved STARS map resolves; available maps will start hidden (" + ancestor + ").";
         }
         if (ids.isEmpty()) {
             const auto f = byId.value(p.facility);
             const QString cab = f.value("towerCabConfiguration").toObject().value("videoMapId").toString();
             if (!cab.isEmpty()) {
-                p.warnings << "No STARS maps configured; using the " + p.facility + " tower-cab map.";
-                ids << cab;
+                p.warnings << "No STARS maps configured; " + p.facility + " tower-cab map is available but starts hidden.";
             }
         }
     } else {
@@ -194,7 +227,6 @@ Profile inspect(const QString &file, const QString &mapRoot) {
         if (ids.isEmpty()) p.warnings << "No video map is configured for this display.";
     }
     ids.removeDuplicates();
-    if (ids.isEmpty()) p.warnings << "No compatible video map IDs are configured for this profile.";
     QStringList offered = ids;
     const QString starsType = p.view.value("$type").toString();
     if (starsType.contains("Stars", Qt::CaseInsensitive)) {
@@ -206,7 +238,7 @@ Profile inspect(const QString &file, const QString &mapRoot) {
         }
         for (const auto &id : available) if (!id.toString().isEmpty()) offered << id.toString();
     } else if (!p.view.value("ActiveGeoMap").toString().isEmpty()) {
-        // The selected ERAM group is the offered set, not every group in the ARTCC.
+        offered << geoGroupIds;
     } else {
         const auto f = byId.value(p.facility);
         for (const QString &id : {f.value("towerCabConfiguration").toObject().value("videoMapId").toString(),
@@ -221,7 +253,8 @@ Profile inspect(const QString &file, const QString &mapRoot) {
         const QString path = mapPath(mapRoot, p.artcc, id);
         if (!QFileInfo::exists(path)) { if (selected.contains(id)) p.warnings << "Missing map: " + path; continue; }
         const auto data = json(path);
-        p.maps << Map{id, data.value("name").toString(id), path, selected.contains(id)};
+        p.maps << Map{id, readableMapName(data.value("name").toString(), p.facility.isEmpty() ? p.artcc : p.facility,
+                                           offered.indexOf(id) + 1), path, selected.contains(id)};
     }
     return p;
 }
@@ -349,7 +382,7 @@ void buildMapLayers(const Map &map, QJsonArray &world, QJsonObject &colors, QJso
         if (group.kind == "polygon") styles.insert(group.style, QJsonObject{{"fill", colorName}});
         else styles.insert(group.style, QJsonObject{{"line", colorName}, {"line-width", 1.4}});
         world.append(QJsonObject{{"id", "CRC_" + map.id + "_" + QString::number(++counter)},
-                                 {"name", map.name + " / " + group.kind + " #" + group.color},
+                                 {"name", map.name + (groups.size() > 1 ? " " + group.kind + " #" + group.color : "")},
                                  {"style", group.style}, {"kind", group.kind}, {"visible", map.selected},
                                  {"lod", QJsonArray{0, 10000}}, {"geom", group.paths}});
     }
@@ -459,7 +492,11 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
     const double delta = qBound(0.02, range / 60.0, 60.0), lonDelta = delta / qMax(0.25, std::cos(lat * 3.141592653589793 / 180));
     QString asr = QString("DisplayTypeName:%1\nDisplayTypeNeedRadarContent:%2\nDisplayTypeGeoReferenced:1\nSECTORFILE:\nSECTORTITLE:%3.sct\nSHOWC:1\nSHOWSB:1\n")
         .arg(ground ? "Ground Radar display" : "Standard ES radar screen").arg(ground ? 0 : 1).arg(stem);
-    for (const auto &id : activeLayerIds) asr += "PLUGIN:Jurina's Renderer:JurinaRender_" + id + ":1\n";
+    for (const auto &layer : world) {
+        const auto entry = layer.toObject();
+        asr += "PLUGIN:Jurina's Renderer:JurinaRender_" + entry.value("id").toString()
+             + (entry.value("visible").toBool() ? ":1\n" : ":0\n");
+    }
     asr += QString("WINDOWAREA:%1:%2:%3:%4\n")
         .arg(lat - delta, 0, 'f', 6).arg(lon - lonDelta, 0, 'f', 6)
         .arg(lat + delta, 0, 'f', 6).arg(lon + lonDelta, 0, 'f', 6);
