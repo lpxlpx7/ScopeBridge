@@ -2,6 +2,8 @@
 
 ScopeBridge converts a CRC profile and GeoJSON video maps into a EuroScope package using **Jurina's Renderer**. The Windows release folder contains `ScopeBridge.exe`, the Qt runtime, a precompiled 32-bit `JurinasRenderer.dll`, TopSky files, and the example EuroScope symbology preset.
 
+ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable archive includes the license text; bundled Qt and TopSky files retain their own licenses. The renderer source is maintained in the sibling `plugin/` workspace, with the ScopeBridge-specific changes provided as a [patch](renderer-world-polygons.patch).
+
 ## Use
 
 1. Unzip the whole `ScopeBridge-Windows-x64.zip` archive and launch `ScopeBridge.exe` (keep `assets/`, the Qt DLLs and `platforms/` beside the executable).
@@ -19,6 +21,10 @@ The output folder contains:
 - `Plugins/JurinasRenderer/{JurinasRenderer.dll,ground.json,style.json}` and `Plugins/TopSky/`.
 
 The renderer displays each available video map in its layer panel with a readable English name. The profile's selected STARS maps or enabled ERAM filters start visible; all other available maps start hidden and can be enabled from the panel. If a saved STARS number no longer resolves, all available maps start hidden rather than being activated automatically. GeoJSON line and polygon geometry (including filled polygons) is converted from longitude/latitude into the renderer's latitude/longitude format. The bundled renderer is built from the sibling `plugin/src/CANGroundRender.cpp` with world-layer polygon drawing enabled. `style.json` uses the source feature colors when provided and the ZME example's video color for uncolored features. CRC-only symbols and text cannot be recreated from these features. The TopSky visual theme comes from the ZME example; its Japan-specific airspace file is replaced with an empty placeholder so RJxx rules are not applied to another ARTCC. The symbology preset is likewise the ZME example's palette, not a CRC-specific export.
+
+## ARTCC compatibility
+
+The facility is selected from the profile's `ArtccId`, not hard-coded to ZME. ScopeBridge finds the corresponding `ARTCCs/<ArtccId>.json`, resolves a STARS `SelectedVideoMapIds` entry against the display facility's `starsConfiguration.videoMapIds` (or its parent facility), maps ERAM `ActiveGeoMap` and `MapFilters` through the facility's geo-map list and feature filters, and supports tower-cab, ASDEX and SAID displays. It looks for GeoJSON files in `VideoMaps/<ArtccId>/` or in a directly selected ARTCC map folder. Tested with profiles from ZDC, ZLA, ZME, ZNY, ZOA and ZSU. If CRC has changed its facility data since a profile was saved, out-of-range map numbers are reported; unselected maps remain available in the renderer panel but start hidden.
 
 Generated `.ese` positions and frequencies come from CRC facility data; position coordinates use the selected profile view center because CRC positions do not supply per-position coordinates. CRC profile/map data cannot reproduce the full original ZME package's external NAV/TopSky/other-plugin setup. Source files are never changed.
 

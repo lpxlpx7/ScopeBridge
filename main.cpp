@@ -1,3 +1,7 @@
+// ScopeBridge - CRC profile to EuroScope converter.
+// Copyright (C) 2026 ScopeBridge contributors.
+// SPDX-License-Identifier: GPL-3.0-only
+// This program is provided without warranty; see LICENSE.
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCoreApplication>
@@ -557,6 +561,8 @@ int main(int argc, char **argv) {
     auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(25, 22, 25, 22); layout->setSpacing(12);
     auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); layout->addWidget(title);
     auto *hint = new QLabel("Choose one CRC profile and the VideoMaps folder, then generate a EuroScope sector package."); hint->setObjectName("hint"); layout->addWidget(hint);
+    auto *licenseNotice = new QLabel("Copyright © 2026 ScopeBridge contributors · GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">View license</a>");
+    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); layout->addWidget(licenseNotice);
     const QString local = qEnvironmentVariable("LOCALAPPDATA");
     auto *sources = new QGroupBox("CREATE SECTOR"); auto *form = new QFormLayout(sources);
     auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString()) {
