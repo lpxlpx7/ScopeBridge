@@ -1,7 +1,7 @@
 #include <QApplication>
 #include <QBoxLayout>
-#include <QComboBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -18,9 +18,9 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTextStream>
+#include <QUrl>
 #include <QWidget>
 #include <cmath>
 
@@ -49,14 +49,17 @@ QString safe(QString name) {
     return name.isEmpty() ? "Profile" : name;
 }
 void facilities(const QJsonObject &f, QHash<QString, QJsonObject> &byId,
-                QHash<QString, QString> &positions) {
+                QHash<QString, QString> &positions, QHash<QString, QString> &parents,
+                const QString &parent = {}) {
     const QString id = f.value("id").toString();
     if (!id.isEmpty()) byId.insert(id, f);
+    if (!parent.isEmpty()) parents.insert(id, parent);
     for (const auto &p : f.value("positions").toArray()) {
         const QString position = p.toObject().value("id").toString();
         if (!position.isEmpty()) positions.insert(position, id);
     }
-    for (const auto &child : f.value("childFacilities").toArray()) facilities(child.toObject(), byId, positions);
+    for (const auto &child : f.value("childFacilities").toArray())
+        facilities(child.toObject(), byId, positions, parents, id);
 }
 QJsonObject activeDisplay(const QJsonObject &profile) {
     const auto windows = profile.value("DisplayWindowSettings").toArray();
@@ -76,18 +79,32 @@ QJsonObject activeDisplay(const QJsonObject &profile) {
     return {};
 }
 QString mapPath(const QString &root, const QString &artcc, const QString &id) {
-    return QDir(root).filePath(artcc + "/" + id + ".geojson");
+    const QString nested = QDir(root).filePath(artcc + "/" + id + ".geojson");
+    return QFileInfo::exists(nested) ? nested : QDir(root).filePath(id + ".geojson");
 }
-Profile inspect(const QString &file, const QString &artccRoot, const QString &mapRoot) {
+QString artccFile(const QString &profileFile, const QString &maps, const QString &artcc) {
+    const QDir profileDir = QFileInfo(profileFile).dir();
+    const QString local = qEnvironmentVariable("LOCALAPPDATA");
+    const QStringList candidates = {
+        profileDir.filePath("../ARTCCs/" + artcc + ".json"),
+        QDir(maps).filePath("../ARTCCs/" + artcc + ".json"),
+        QDir(maps).filePath("../../ARTCCs/" + artcc + ".json"),
+        QDir(local).filePath("CRC/ARTCCs/" + artcc + ".json")
+    };
+    for (const auto &path : candidates) if (QFileInfo::exists(path)) return path;
+    throw QString("Facility data for %1 was not found. Keep CRC/ARTCCs next to CRC/Profiles and CRC/VideoMaps, or install CRC locally.").arg(artcc);
+}
+Profile inspect(const QString &file, const QString &mapRoot) {
     const auto data = json(file);
     Profile p;
     p.path = file; p.name = data.value("Name").toString(QFileInfo(file).baseName());
     p.artcc = data.value("ArtccId").toString();
     if (p.artcc.isEmpty()) throw QString("Profile has no ArtccId: %1").arg(file);
-    const auto root = json(QDir(artccRoot).filePath(p.artcc + ".json")).value("facility").toObject();
+    const auto root = json(artccFile(file, mapRoot, p.artcc)).value("facility").toObject();
     QHash<QString, QJsonObject> byId;
     QHash<QString, QString> positions;
-    facilities(root, byId, positions);
+    QHash<QString, QString> parents;
+    facilities(root, byId, positions, parents);
     p.view = activeDisplay(data);
     if (p.view.isEmpty()) p.warnings << "No visible CRC display was found.";
     p.facility = positions.value(p.view.value("PositionId").toString(), p.view.value("FacilityId").toString());
@@ -106,7 +123,12 @@ Profile inspect(const QString &file, const QString &artccRoot, const QString &ma
         }
         if (!matched || ids.isEmpty()) p.warnings << "Active ERAM geo group was not found or is empty: " + geo;
     } else if (p.view.value("$type").toString().contains("Stars", Qt::CaseInsensitive)) {
-        const auto list = byId.value(p.facility).value("starsConfiguration").toObject().value("videoMapIds").toArray();
+        auto list = byId.value(p.facility).value("starsConfiguration").toObject().value("videoMapIds").toArray();
+        QString ancestor = p.facility;
+        while (list.isEmpty() && parents.contains(ancestor)) {
+            ancestor = parents.value(ancestor);
+            list = byId.value(ancestor).value("starsConfiguration").toObject().value("videoMapIds").toArray();
+        }
         const auto selected = p.view.value("CurrentPrefSet").toObject().value("SelectedVideoMapIds").toArray();
         for (const auto &number : selected) {
             const int index = number.toInt(-1) - 1;
@@ -115,11 +137,16 @@ Profile inspect(const QString &file, const QString &artccRoot, const QString &ma
         }
     } else {
         const auto f = byId.value(p.facility);
-        for (const QString &key : {"towerCabConfiguration", "asdexConfiguration"}) {
+        const QString type = p.view.value("$type").toString();
+        if (type.contains("SaabSaid", Qt::CaseInsensitive)) {
+            const auto id = f.value("saidConfiguration").toObject().value("saabConfiguration").toObject().value("videoMapId").toString();
+            if (!id.isEmpty()) ids << id;
+        } else {
+            const QString key = type.contains("Asdex", Qt::CaseInsensitive) ? "asdexConfiguration" : "towerCabConfiguration";
             const auto id = f.value(key).toObject().value("videoMapId").toString();
             if (!id.isEmpty()) ids << id;
         }
-        if (ids.isEmpty()) p.warnings << "No tower cab / ASDEX map configured for this display.";
+        if (ids.isEmpty()) p.warnings << "No video map is configured for this display.";
     }
     ids.removeDuplicates();
     for (const auto &id : ids) {
@@ -199,7 +226,7 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
     const QString stem = safe(p.artcc + "_" + p.name);
     QStringList geo;
     Result result; result.warnings = p.warnings;
-    if (sector.isEmpty()) result.warnings << "No base sector supplied: navigation, airports and runways are not included.";
+    if (sector.isEmpty()) result.warnings << "No legacy sector found: this package contains CRC video maps but no navigation or runway data.";
     for (int i = 0; i < p.maps.size(); ++i) {
         const auto &m = p.maps.at(i);
         const auto data = json(m.source);
@@ -221,7 +248,7 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
     if (!foundation.contains(QRegularExpression("(?im)^#define\\s+CRCMap\\s+")))
         foundation.prepend("#define CRCMap 12632256\n");
     write(QDir(folder).filePath(stem + ".sct"), foundation + "[GEO]\n" + geo.join("\n") + "\n");
-    const bool ground = p.display.contains("Cab", Qt::CaseInsensitive) || p.display.contains("Asdex", Qt::CaseInsensitive);
+    const bool ground = p.display.contains("Cab", Qt::CaseInsensitive) || p.display.contains("Asdex", Qt::CaseInsensitive) || p.display.contains("Said", Qt::CaseInsensitive);
     auto center = p.view.value("Center").toObject();
     if (center.isEmpty()) center = p.view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
     const double lat = center.value("Lat").toDouble(35), lon = center.value("Lon").toDouble(-90);
@@ -245,9 +272,10 @@ int main(int argc, char **argv) {
         try {
             const QString file = QString::fromLocal8Bit(argv[2]);
             const QString destination = QString::fromLocal8Bit(argv[3]);
-            const QString base = argc >= 5 ? QString::fromLocal8Bit(argv[4]) : QString();
             const QString local = qEnvironmentVariable("LOCALAPPDATA");
-            const auto p = inspect(file, local + "/CRC/ARTCCs", local + "/CRC/VideoMaps");
+            const QString maps = argc >= 5 ? QString::fromLocal8Bit(argv[4]) : local + "/CRC/VideoMaps";
+            const QString base = argc >= 6 ? QString::fromLocal8Bit(argv[5]) : QString();
+            const auto p = inspect(file, maps);
             const auto result = convert(p, destination, base);
             QTextStream(stdout) << p.name << ": " << result.maps << " maps, " << result.segments << " segments\n";
             for (const auto &warning : result.warnings) QTextStream(stdout) << "Warning: " << warning << "\n";
@@ -273,46 +301,43 @@ int main(int argc, char **argv) {
     )");
     QWidget window;
     window.setWindowTitle("ScopeBridge | CRC to EuroScope");
-    window.resize(1050, 810);
+    window.resize(960, 690);
     auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(25, 22, 25, 22); layout->setSpacing(12);
     auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); layout->addWidget(title);
-    auto *hint = new QLabel("Generate a EuroScope sector package from your active CRC profile and video maps."); hint->setObjectName("hint"); layout->addWidget(hint);
-    const QString local = qEnvironmentVariable("LOCALAPPDATA", QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/..");
-    auto *sources = new QGroupBox("SOURCE FILES"); auto *form = new QFormLayout(sources);
-    auto field = [&](const QString &caption, const QString &initial, bool directory) {
+    auto *hint = new QLabel("Choose one CRC profile and the VideoMaps folder, then generate a EuroScope sector package."); hint->setObjectName("hint"); layout->addWidget(hint);
+    const QString local = qEnvironmentVariable("LOCALAPPDATA");
+    auto *sources = new QGroupBox("CREATE SECTOR"); auto *form = new QFormLayout(sources);
+    auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString()) {
         auto *edit = new QLineEdit(initial); auto *row = new QWidget; auto *h = new QHBoxLayout(row);
         h->setContentsMargins(0, 0, 0, 0); h->addWidget(edit);
         auto *browse = new QPushButton("Browse"); h->addWidget(browse); form->addRow(caption, row);
         QObject::connect(browse, &QPushButton::clicked, &window, [=, &window] {
             QString path = directory ? QFileDialog::getExistingDirectory(&window, caption, edit->text())
-                : QFileDialog::getOpenFileName(&window, caption, edit->text(), "Sector files (*.sct);;All files (*)");
+                : QFileDialog::getOpenFileName(&window, caption, edit->text(), filter);
             if (!path.isEmpty()) edit->setText(path);
         });
         return edit;
     };
-    auto *profiles = field("Profiles", local + "/CRC/Profiles", true);
-    auto *artccs = field("ARTCC files", local + "/CRC/ARTCCs", true);
-    auto *maps = field("Video maps", local + "/CRC/VideoMaps", true);
-    auto *sector = field("Base sector (optional)", "", false);
-    auto *output = field("Output folder", QDir::homePath() + "/CRC-ES-Output", true);
+    auto *profile = field("CRC profile (.json)", local + "/CRC/Profiles", false, "CRC profiles (*.json)");
+    auto *maps = field("VideoMaps folder", local + "/CRC/VideoMaps", true);
+    auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
     layout->addWidget(sources);
+    auto *note = new QLabel("Facilities are detected automatically. Select the CRC/VideoMaps folder or its facility subfolder.");
+    note->setObjectName("hint"); layout->addWidget(note);
     auto *bar = new QHBoxLayout;
-    auto *choose = new QComboBox; choose->setMinimumWidth(330);
-    auto *refresh = new QPushButton("Scan profiles"); bar->addWidget(choose, 1); bar->addWidget(refresh); layout->addLayout(bar);
+    auto *refresh = new QPushButton("Preview maps"); bar->addStretch(); bar->addWidget(refresh); layout->addLayout(bar);
     auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Selected video map", "CRC ID", "Source"});
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers); layout->addWidget(table, 1);
     auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setMaximumHeight(110); layout->addWidget(log);
-    auto *actions = new QHBoxLayout; auto *status = new QLabel("Ready to scan."); status->setObjectName("hint");
-    auto *generate = new QPushButton("Generate package"); generate->setObjectName("primary");
+    auto *actions = new QHBoxLayout; auto *status = new QLabel("Select a CRC profile to begin."); status->setObjectName("hint");
+    auto *generate = new QPushButton("Generate EuroScope sector"); generate->setObjectName("primary");
     actions->addWidget(status, 1); actions->addWidget(generate); layout->addLayout(actions);
-    QList<Profile> found;
-    auto preview = [&] {
+    auto preview = [&]() -> Profile {
         table->setRowCount(0);
-        const int index = choose->currentIndex(); if (index < 0 || index >= found.size()) return;
-        const auto &p = found.at(index);
+        const Profile p = inspect(profile->text(), maps->text());
         status->setText(QString("%1 · %2 · %3 map(s)").arg(p.artcc, p.facility).arg(p.maps.size()));
         log->setPlainText(p.warnings.isEmpty() ? "Profile resolved successfully." : p.warnings.join("\n"));
         for (const auto &map : p.maps) {
@@ -321,30 +346,23 @@ int main(int argc, char **argv) {
             table->setItem(r, 1, new QTableWidgetItem(map.id));
             table->setItem(r, 2, new QTableWidgetItem(map.source));
         }
+        return p;
     };
-    QObject::connect(choose, QOverload<int>::of(&QComboBox::currentIndexChanged), &window, [&](int){ preview(); });
     QObject::connect(refresh, &QPushButton::clicked, &window, [&] {
-        found.clear(); choose->clear(); QStringList errors;
-        for (const auto &file : QDir(profiles->text()).entryInfoList({"*.json"}, QDir::Files, QDir::Name)) {
-            try { found << inspect(file.absoluteFilePath(), artccs->text(), maps->text()); }
-            catch (const QString &e) { errors << e; }
-        }
-        for (const auto &p : found) choose->addItem(p.artcc + "  /  " + p.name + "  ·  " + QString::number(p.maps.size()) + " maps");
-        preview();
-        if (!errors.isEmpty()) log->appendPlainText(QString("\n%1 profile(s) could not be read:\n").arg(errors.size()) + errors.join("\n"));
-        if (found.isEmpty()) status->setText("No profiles found. Check source folders.");
+        try { preview(); }
+        catch (const QString &e) { status->setText("Cannot preview maps."); log->setPlainText(e); }
     });
     QObject::connect(generate, &QPushButton::clicked, &window, [&] {
-        const int i = choose->currentIndex(); if (i < 0 || i >= found.size()) return;
         try {
-            const auto result = convert(found.at(i), output->text(), sector->text());
-            const QString path = QDir(output->text()).filePath(safe(found.at(i).artcc + "_" + found.at(i).name));
+            const auto p = preview();
+            const auto result = convert(p, output->text(), {});
+            const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
             status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));
             log->setPlainText("Package: " + path + (result.warnings.isEmpty() ? "" : "\n" + result.warnings.join("\n")));
-            QMessageBox::information(&window, "Package generated", "Open the .prf file in EuroScope:\n" + path);
+            QMessageBox::information(&window, "Package generated", "EuroScope files were created in:\n" + path);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
         } catch (const QString &e) { QMessageBox::critical(&window, "Conversion failed", e); log->setPlainText(e); }
     });
     window.show();
-    QMetaObject::invokeMethod(refresh, "click", Qt::QueuedConnection);
     return app.exec();
 }

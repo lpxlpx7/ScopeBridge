@@ -1,35 +1,29 @@
 # ScopeBridge
 
-A C++17 / Qt 6 desktop converter for local CRC profiles and video maps. It creates a standalone EuroScope `.sct`, `.asr`, and `.prf` for the selected profile. The interface and generated comments are in English.
+ScopeBridge turns a CRC profile and its GeoJSON video maps into EuroScope sector files. The Windows release includes `ScopeBridge.exe` and the Qt runtime files it needs.
 
-## Build
+## Use the Windows app
 
-Install Qt 6 Widgets, CMake 3.21+ and a C++17 compiler. This machine has Qt 6.11.2 for MinGW in `I:/Qt/6.11.2/mingw_64` and the matching compiler in `I:/Qt/Tools/mingw1310_64`. From this directory, build with PowerShell:
+1. Open `ScopeBridge.exe` in the **release folder**. Keep its accompanying DLLs and `platforms` folder beside the exe.
+2. Browse to one CRC profile `.json` (usually under `%LOCALAPPDATA%\CRC\Profiles`).
+3. Choose the CRC `VideoMaps` folder (or its ARTCC subfolder, such as `VideoMaps\ZME`).
+4. Click **Generate EuroScope sector**. The output folder opens automatically. Open the generated `.prf` in EuroScope.
+
+Packages are saved in `~/ScopeBridge-Output/<ARTCC>_<profile>/` by default. You can change the output folder in the app. The converter automatically finds the facility definition under `CRC/ARTCCs` alongside the profile or VideoMaps folders, or in the local CRC installation. The original CRC files are not modified. **Preview maps** is optional.
+
+The output contains a `.sct` with the selected video-map outlines in `[GEO]`, an `.asr` with the CRC display's view and a `.prf` that references both. CRC profiles and video maps alone do **not** contain all navigation, runway, positions, settings and plugin data in the full ZME example package. Thus the output is a functional map sector package, not a byte-for-byte reproduction of the ZME example. Point symbols, text, fills and CRC-specific styles are not converted; polygon boundaries are drawn as lines.
+
+## Build from source
+
+Requires CMake 3.21+, Qt 6 Widgets and a matching C++17 compiler. For Qt 6.11.2 and MinGW installed under `I:\Qt`, run from this directory in PowerShell:
 
 ```powershell
 $env:PATH="I:\Qt\Tools\mingw1310_64\bin;I:\Qt\6.11.2\mingw_64\bin;$env:PATH"
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="I:/Qt/6.11.2/mingw_64" -DCMAKE_C_COMPILER="I:/Qt/Tools/mingw1310_64/bin/gcc.exe" -DCMAKE_CXX_COMPILER="I:/Qt/Tools/mingw1310_64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="I:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
 cmake --build build --config Release
+& "I:\Qt\6.11.2\mingw_64\bin\windeployqt.exe" --release --compiler-runtime --dir "build\release" "build\ScopeBridge.exe"
 ```
 
-Replace the Qt paths for another installation. To distribute the executable independently, run `windeployqt` on the built executable.
+Copy `ScopeBridge.exe` into `build/release` before distributing that folder (or use the prebuilt release folder). Qt is dynamically linked, so copying only the exe does not create a standalone app.
 
-## Use
-
-1. Launch **ScopeBridge**. By default it reads `%LOCALAPPDATA%/CRC/Profiles`, `%LOCALAPPDATA%/CRC/ARTCCs` and `%LOCALAPPDATA%/CRC/VideoMaps` (override any path in the UI).
-2. Optionally choose a legacy EuroScope `.sct` as **Base sector**. Its navigation, airports, runways and other non-`[GEO]` sections are preserved; its old `[GEO]` blocks are replaced with the selected CRC maps. Without a base sector, the generated sector contains basic `[INFO]` and video geometry only.
-3. Click **Scan profiles**, choose a profile and inspect its selected map names/IDs. Click **Generate package**. Open the generated `.prf` in EuroScope, then load its `.asr` if EuroScope does not open it automatically.
-
-For command-line conversion (useful for automation), run `ScopeBridge.exe --convert <profile.json> <output-directory> [base.sct]`. This uses the default CRC `ARTCCs` and `VideoMaps` directories and does not open the GUI.
-
-The converter creates one folder per profile under the chosen output directory. Source CRC files and the base sector are never modified. Each run replaces the generated `.sct`, `.asr` and `.prf` in that profile folder.
-
-## Map selection and geometry
-
-- STARS: the active visible window's `SelectedDisplayId` selects a display. `CurrentPrefSet.SelectedVideoMapIds` contains **1-based indices** into that display position's facility `starsConfiguration.videoMapIds` in `ARTCCs/<ArtccId>.json`.
-- ERAM: `ActiveGeoMap` names a group under the ARTCC's `eramConfiguration.geoMaps`; all maps in the active group are included.
-- Tower cab / ASDEX displays: `towerCabConfiguration.videoMapId` and `asdexConfiguration.videoMapId` are used when available.
-- The app resolves every ID to `VideoMaps/<ArtccId>/<id>.geojson`, previews the names, and reports missing files or invalid indices. Only the currently selected display is converted; hidden tabs are not combined.
-- GeoJSON `LineString`, `MultiLineString`, `Polygon`, `MultiPolygon` (including inner rings), and `GeometryCollection` lines become EuroScope `[GEO]` segments. GeoJSON coordinates are longitude/latitude; EuroScope uses latitude/longitude in DMS. Polygons are represented as outlines, and point features, fills, text, and CRC-specific line styling are not transferred. One shared `CRCMap` color is defined in the sector file.
-
-Large ERAM groups can produce very large sector files. Conversion reads only the selected maps; supplying a compatible base sector yields the most complete EuroScope sector.
+For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct]`. If a base `.sct` is supplied, its non-`[GEO]` sections are preserved and its `[GEO]` maps are replaced. The GUI requires only the profile and VideoMaps locations.
