@@ -20,6 +20,7 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QFrame>
 #include <QMessageBox>
 #include <QMap>
 #include <QPlainTextEdit>
@@ -29,6 +30,8 @@
 #include <QTextStream>
 #include <QUrl>
 #include <QSet>
+#include <oclero/qlementine.hpp>
+#include <oclero/qlementine/style/QlementineStyle.hpp>
 #include <QWidget>
 #include <cmath>
 
@@ -542,29 +545,35 @@ int main(int argc, char **argv) {
         }
     }
     QApplication app(argc, argv);
-    app.setStyle("Fusion");
+    app.setApplicationName("ScopeBridge");
+    app.setApplicationVersion(SCOPEBRIDGE_VERSION);
+    auto *style = new oclero::qlementine::QlementineStyle(&app);
+    QApplication::setStyle(style);
+    style->setThemeJsonPath(":/scopebridge/dark.json");
     app.setStyleSheet(R"(
-        QWidget { background:#111827; color:#e5eaf3; font-family:'Segoe UI'; font-size:13px; }
-        QLabel#title { font-size:28px; font-weight:700; color:#f5f8ff; }
-        QLabel#hint { color:#94a3b8; font-size:12px; }
-        QGroupBox { border:1px solid #344256; border-radius:12px; margin-top:16px; padding:14px; font-weight:600; }
-        QGroupBox::title { subcontrol-origin:margin; left:16px; padding:0 6px; color:#9ac6ff; }
-        QLineEdit,QComboBox,QPlainTextEdit,QTableWidget { background:#1c293b; border:1px solid #3a4b62; border-radius:7px; padding:7px; selection-background-color:#2967a6; }
-        QTableWidget { gridline-color:#344256; } QHeaderView::section { background:#233349; padding:7px; border:0; }
-        QPushButton { background:#294466; border:1px solid #456489; border-radius:8px; padding:9px 16px; font-weight:600; }
-        QPushButton:hover { background:#38628c; } QPushButton#primary { background:#1676ca; border:0; color:white; padding:12px 24px; }
-        QPushButton#primary:hover { background:#278be0; }
+        QLabel#title { font-size:28px; font-weight:700; }
+        QLabel#eyebrow { font-size:11px; font-weight:700; color:#78baff; }
+        QLabel#hint { color:#9baec4; }
+        QLabel#version { color:#9baec4; font-size:12px; }
+        QFrame#card { border:1px solid #394455; border-radius:14px; }
     )");
     QWidget window;
-    window.setWindowTitle("ScopeBridge | CRC to EuroScope");
-    window.resize(960, 690);
-    auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(25, 22, 25, 22); layout->setSpacing(12);
-    auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); layout->addWidget(title);
-    auto *hint = new QLabel("Choose one CRC profile and the VideoMaps folder, then generate a EuroScope sector package."); hint->setObjectName("hint"); layout->addWidget(hint);
-    auto *licenseNotice = new QLabel("Copyright © 2026 ScopeBridge contributors · GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">View license</a>");
-    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); layout->addWidget(licenseNotice);
+    window.setWindowTitle("ScopeBridge " SCOPEBRIDGE_VERSION);
+    window.setMinimumSize(880, 700);
+    window.resize(1020, 780);
+    auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(28, 24, 28, 22); layout->setSpacing(16);
+    auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); layout->addWidget(eyebrow);
+    auto *heading = new QHBoxLayout;
+    auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); heading->addWidget(title);
+    heading->addStretch();
+    auto *version = new QLabel("VERSION " SCOPEBRIDGE_VERSION); version->setObjectName("version"); heading->addWidget(version);
+    layout->addLayout(heading);
+    auto *hint = new QLabel("Build a renderer-ready EuroScope package from a saved CRC display."); hint->setObjectName("hint"); layout->addWidget(hint);
     const QString local = qEnvironmentVariable("LOCALAPPDATA");
-    auto *sources = new QGroupBox("CREATE SECTOR"); auto *form = new QFormLayout(sources);
+    auto *sources = new QFrame; sources->setObjectName("card");
+    auto *sourceLayout = new QVBoxLayout(sources); sourceLayout->setContentsMargins(20, 16, 20, 18); sourceLayout->setSpacing(10);
+    auto *sourceTitle = new QLabel("01  /  Source & destination"); sourceLayout->addWidget(sourceTitle);
+    auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignLeft); form->setSpacing(12); sourceLayout->addLayout(form);
     auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString()) {
         auto *edit = new QLineEdit(initial); auto *row = new QWidget; auto *h = new QHBoxLayout(row);
         h->setContentsMargins(0, 0, 0, 0); h->addWidget(edit);
@@ -581,19 +590,25 @@ int main(int argc, char **argv) {
     auto *sector = field("Base sector (.sct, optional)", "", false, "EuroScope sectors (*.sct)");
     auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
     layout->addWidget(sources);
-    auto *note = new QLabel("Facilities are detected automatically. Select the CRC/VideoMaps folder or its facility subfolder.");
+    auto *note = new QLabel("Facility data is detected automatically. Use the VideoMaps root or a single ARTCC folder.");
     note->setObjectName("hint"); layout->addWidget(note);
     auto *bar = new QHBoxLayout;
-    auto *refresh = new QPushButton("Preview maps"); bar->addStretch(); bar->addWidget(refresh); layout->addLayout(bar);
+    auto *previewTitle = new QLabel("02  /  Map preview"); bar->addWidget(previewTitle); bar->addStretch();
+    auto *refresh = new QPushButton("Preview maps"); bar->addWidget(refresh); layout->addLayout(bar);
     auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Video map / default visibility", "CRC ID", "Source"});
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    table->setAlternatingRowColors(true);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers); layout->addWidget(table, 1);
     auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setMaximumHeight(110); layout->addWidget(log);
     auto *actions = new QHBoxLayout; auto *status = new QLabel("Select a CRC profile to begin."); status->setObjectName("hint");
     auto *generate = new QPushButton("Generate EuroScope sector"); generate->setObjectName("primary");
+    generate->setDefault(true);
     actions->addWidget(status, 1); actions->addWidget(generate); layout->addLayout(actions);
+    auto *licenseNotice = new QLabel("GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">License</a> · UI powered by Qlementine (MIT)");
+    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); layout->addWidget(licenseNotice);
     auto preview = [&]() -> Profile {
         table->setRowCount(0);
         const Profile p = inspect(profile->text(), maps->text());

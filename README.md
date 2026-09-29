@@ -2,6 +2,8 @@
 
 ScopeBridge converts a CRC profile and GeoJSON video maps into a EuroScope package using **Jurina's Renderer**. The Windows release folder contains `ScopeBridge.exe`, the Qt runtime, a precompiled 32-bit `JurinasRenderer.dll`, TopSky files, and the example EuroScope symbology preset.
 
+The desktop interface uses [Qlementine](https://github.com/oclero/qlementine) v1.4.2 (MIT license) with a bundled dark theme. The complete portable archive includes `QLEMENTINE-LICENSE.txt`; the Qt GUI is statically linked with Qlementine and still dynamically links to Qt.
+
 ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable archive includes the license text; bundled Qt and TopSky files retain their own licenses. The renderer source is maintained in the sibling `plugin/` workspace, with the ScopeBridge-specific changes provided as a [patch](renderer-world-polygons.patch).
 
 ## Use
@@ -10,6 +12,8 @@ ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable 
 2. Choose a CRC profile `.json` and its `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
 3. Optionally choose a **Base sector** `.sct` to preserve navigation, airports, runways and other non-GEO sections. If omitted, the sector only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
 4. Click **Preview maps** to see which are initially **ON** and which available maps start **OFF**. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope.
+
+**CRC:1 tab selection:** ScopeBridge exports the first visible CRC display window saved in the profile (the `CRC:1` page). Within that window, it uses the tab identified by `SelectedDisplayId`; if no saved tab matches, it falls back to the first usable tab. Other CRC windows and tabs are not combined into the export. To export a different tab, select and save it in the CRC profile before generating again.
 
 The output folder contains:
 
@@ -37,6 +41,8 @@ $env:PATH="I:\Qt\Tools\mingw1310_64\bin;I:\Qt\6.11.2\mingw_64\bin;$env:PATH"
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="I:/Qt/6.11.2/mingw_64" -DCMAKE_CXX_COMPILER="I:/Qt/Tools/mingw1310_64/bin/g++.exe" -DCMAKE_MAKE_PROGRAM="I:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
 cmake --build build
 ```
+
+The CMake build downloads Qlementine from its pinned v1.4.2 commit on GitHub. `QLEMENTINE_SANDBOX` and `QLEMENTINE_SHOWCASE` are disabled. Offline builders may set `-DFETCHCONTENT_SOURCE_DIR_QLEMENTINE=<local-source-directory>` to a local copy of that commit. Package Qlementine's MIT license alongside the portable app.
 
 The renderer DLL must be built **as x86** using `plugin/build.bat` in a Visual Studio x86 Native Tools environment; the Qt GUI is x64. For a standalone checkout, apply [`renderer-world-polygons.patch`](renderer-world-polygons.patch) to the matching renderer workspace before building; it includes layer defaults and UTF-8 panel labels. Copy the resulting `plugin/bin/JurinasRenderer.dll` to `build/release/assets/JurinasRenderer.dll`, and the workspace's `ZME/Plugins/TopSky` and `ZME/Settings/Symbology.txt` to `build/release/assets/TopSky` and `build/release/assets/Symbology.txt`. Deploy Qt with `windeployqt` and copy `build/ScopeBridge.exe` into `build/release` before distributing that directory. The app reports a missing asset rather than silently creating a broken PRF.
 

@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/scopebridge">
+    <file alias="dark.json">theme/dark.json</file>
+  </qresource>
+</RCC>
