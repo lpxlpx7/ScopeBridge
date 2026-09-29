@@ -32,6 +32,6 @@ cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="I:/Qt/6.11.2/mingw
 cmake --build build
 ```
 
-The renderer DLL must be built **as x86** using `plugin/build.bat` in a Visual Studio x86 Native Tools environment; the Qt GUI is x64. Copy the resulting `plugin/bin/JurinasRenderer.dll` to `build/release/assets/JurinasRenderer.dll`, and the workspace's `ZME/Plugins/TopSky` and `ZME/Settings/Symbology.txt` to `build/release/assets/TopSky` and `build/release/assets/Symbology.txt`. Deploy Qt with `windeployqt` and copy `build/ScopeBridge.exe` into `build/release` before distributing that directory. The app reports a missing asset rather than silently creating a broken PRF.
+The renderer DLL must be built **as x86** using `plugin/build.bat` in a Visual Studio x86 Native Tools environment; the Qt GUI is x64. The workspace's renderer already includes the world-polygon change; for an older checkout, apply [`renderer-world-polygons.patch`](renderer-world-polygons.patch) before building. Copy the resulting `plugin/bin/JurinasRenderer.dll` to `build/release/assets/JurinasRenderer.dll`, and the workspace's `ZME/Plugins/TopSky` and `ZME/Settings/Symbology.txt` to `build/release/assets/TopSky` and `build/release/assets/Symbology.txt`. Deploy Qt with `windeployqt` and copy `build/ScopeBridge.exe` into `build/release` before distributing that directory. The app reports a missing asset rather than silently creating a broken PRF.
 
 For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct]`.
