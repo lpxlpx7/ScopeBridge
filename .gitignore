@@ -1,0 +1,7 @@
+build/
+.qtcreator/
+*.user
+*.exe
+*.dll
+*.o
+*.obj
