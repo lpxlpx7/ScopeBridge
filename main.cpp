@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCoreApplication>
+#include <QColor>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -12,21 +13,48 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTableWidget>
 #include <QTextStream>
 #include <QUrl>
+#include <QSet>
 #include <QWidget>
 #include <cmath>
 
 namespace {
-struct Map { QString id, name, source; };
+struct Map { QString id, name, source; bool selected = false; };
 struct Profile { QString name, artcc, path, display, facility; QList<Map> maps; QStringList warnings; QJsonObject view; };
+QString projectRoot() {
+    const QString local = qEnvironmentVariable("SCOPEBRIDGE_ASSETS");
+    if (!local.isEmpty()) return local;
+    return QCoreApplication::applicationDirPath() + "/assets";
+}
+void copyRequired(const QString &from, const QString &to) {
+    if (!QFileInfo(from).isFile()) throw QString("Required package asset is missing: %1").arg(from);
+    if (QFileInfo::exists(to) && !QFile::remove(to)) throw QString("Cannot replace %1").arg(to);
+    if (!QFile::copy(from, to)) throw QString("Cannot copy %1 to %2").arg(from, to);
+}
+void copyTree(const QString &from, const QString &to) {
+    if (!QDir(from).exists() || !QDir().mkpath(to)) throw QString("Cannot copy assets from %1 to %2").arg(from, to);
+    const QDir source(from);
+    for (const QFileInfo &item : source.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString dest = QDir(to).filePath(item.fileName());
+        if (item.isDir()) copyTree(item.filePath(), dest);
+        else copyRequired(item.filePath(), dest);
+    }
+}
+QString rendererDll() {
+    const QString asset = QDir(projectRoot()).filePath("JurinasRenderer.dll");
+    if (QFileInfo::exists(asset)) return asset;
+    throw QString("Renderer DLL is missing from ScopeBridge/assets. Rebuild and package the x86 plugin first.");
+}
 
 QJsonObject json(const QString &path) {
     QFile file(path);
@@ -167,12 +195,33 @@ Profile inspect(const QString &file, const QString &mapRoot) {
     }
     ids.removeDuplicates();
     if (ids.isEmpty()) p.warnings << "No compatible video map IDs are configured for this profile.";
-    for (const auto &id : ids) {
+    QStringList offered = ids;
+    const QString starsType = p.view.value("$type").toString();
+    if (starsType.contains("Stars", Qt::CaseInsensitive)) {
+        auto facility = p.facility;
+        auto available = byId.value(facility).value("starsConfiguration").toObject().value("videoMapIds").toArray();
+        while (available.isEmpty() && parents.contains(facility)) {
+            facility = parents.value(facility);
+            available = byId.value(facility).value("starsConfiguration").toObject().value("videoMapIds").toArray();
+        }
+        for (const auto &id : available) if (!id.toString().isEmpty()) offered << id.toString();
+    } else if (!p.view.value("ActiveGeoMap").toString().isEmpty()) {
+        // The selected ERAM group is the offered set, not every group in the ARTCC.
+    } else {
+        const auto f = byId.value(p.facility);
+        for (const QString &id : {f.value("towerCabConfiguration").toObject().value("videoMapId").toString(),
+                                 f.value("asdexConfiguration").toObject().value("videoMapId").toString(),
+                                 f.value("saidConfiguration").toObject().value("saabConfiguration").toObject().value("videoMapId").toString()})
+            if (!id.isEmpty()) offered << id;
+    }
+    offered.removeDuplicates();
+    const QSet<QString> selected(ids.cbegin(), ids.cend());
+    for (const auto &id : offered) {
         if (id.isEmpty()) continue;
         const QString path = mapPath(mapRoot, p.artcc, id);
-        if (!QFileInfo::exists(path)) { p.warnings << "Missing map: " + path; continue; }
+        if (!QFileInfo::exists(path)) { if (selected.contains(id)) p.warnings << "Missing map: " + path; continue; }
         const auto data = json(path);
-        p.maps << Map{id, data.value("name").toString(id), path};
+        p.maps << Map{id, data.value("name").toString(id), path, selected.contains(id)};
     }
     return p;
 }
@@ -232,9 +281,129 @@ QString baseSector(const QString &path, const QString &artcc, const QJsonObject 
     }
     auto center = view.value("Center").toObject();
     if (center.isEmpty()) center = view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
+    if (center.isEmpty()) {
+        const auto windows = view.value("CurrentPrefSet").toObject().value("Windows").toArray();
+        if (!windows.isEmpty()) center = windows.first().toObject().value("Center").toObject();
+    }
     const double lat = center.value("Lat").toDouble(35), lon = center.value("Lon").toDouble(-90);
     return QString("; Generated by CRC to EuroScope\n[INFO]\n%1\n%1_CTR\n%1\n%2\n%3\n60\n49\n-1\n1\n\n")
         .arg(artcc, dms(lat, true), dms(lon, false));
+}
+QJsonArray swapped(const QJsonValue &v) {
+    const auto pair = v.toArray();
+    if (pair.size() < 2 || !pair.at(0).isDouble() || !pair.at(1).isDouble()) return {};
+    const double lon = pair.at(0).toDouble(), lat = pair.at(1).toDouble();
+    if (!std::isfinite(lon) || !std::isfinite(lat) || std::abs(lat) > 90 || std::abs(lon) > 180) return {};
+    return QJsonArray{lat, lon};
+}
+void shapes(const QJsonObject &geometry, QJsonArray &lines, QJsonArray &polygons) {
+    const QString type = geometry.value("type").toString();
+    const QJsonArray coords = geometry.value("coordinates").toArray();
+    auto path = [](const QJsonArray &input, int minimum) {
+        QJsonArray output;
+        for (const auto &point : input) { auto converted = swapped(point); if (!converted.isEmpty()) output.append(converted); }
+        return output.size() >= minimum ? output : QJsonArray();
+    };
+    if (type == "LineString") { auto p = path(coords, 2); if (!p.isEmpty()) lines.append(p); }
+    else if (type == "MultiLineString") {
+        for (const auto &value : coords) { auto p = path(value.toArray(), 2); if (!p.isEmpty()) lines.append(p); }
+    } else if (type == "Polygon" || type == "MultiPolygon") {
+        const QJsonArray groups = type == "Polygon" ? QJsonArray{coords} : coords;
+        for (const auto &group : groups)
+            for (const auto &ring : group.toArray()) { auto p = path(ring.toArray(), 3); if (!p.isEmpty()) polygons.append(p); }
+    } else if (type == "GeometryCollection") {
+        for (const auto &part : geometry.value("geometries").toArray()) shapes(part.toObject(), lines, polygons);
+    }
+}
+QJsonArray rgb(const QString &hex) {
+    const QColor color(hex);
+    return QJsonArray{color.red(), color.green(), color.blue()};
+}
+void buildMapLayers(const Map &map, QJsonArray &world, QJsonObject &colors, QJsonObject &styles) {
+    const auto document = json(map.source);
+    struct Group { QJsonArray paths; QString kind, style, color; };
+    QMap<QString, Group> groups;
+    const auto features = document.value("features").toArray();
+    for (const auto &entry : features) {
+        const auto feature = entry.toObject();
+        const auto properties = feature.value("properties").toObject();
+        const QString raw = properties.value("color").toString();
+        const QColor color(raw);
+        const QString hex = color.isValid() ? color.name().mid(1) : "adc1d7";
+        QJsonArray strokes, fills;
+        shapes(feature.value("geometry").toObject(), strokes, fills);
+        for (const auto &kind : {QString("line"), QString("polygon")}) {
+            const QJsonArray paths = kind == "line" ? strokes : fills;
+            if (paths.isEmpty()) continue;
+            const QString key = kind + "_" + hex;
+            auto &group = groups[key]; group.kind = kind; group.color = hex;
+            group.style = "crc_" + key;
+            for (const auto &p : paths) group.paths.append(p);
+        }
+    }
+    int counter = 0;
+    for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+        const Group &group = it.value();
+        const QString colorName = "crc_color_" + group.color;
+        colors.insert(colorName, rgb("#" + group.color));
+        if (group.kind == "polygon") styles.insert(group.style, QJsonObject{{"fill", colorName}});
+        else styles.insert(group.style, QJsonObject{{"line", colorName}, {"line-width", 1.4}});
+        world.append(QJsonObject{{"id", "CRC_" + map.id + "_" + QString::number(++counter)},
+                                 {"name", map.name + " / " + group.kind + " #" + group.color},
+                                 {"style", group.style}, {"kind", group.kind}, {"visible", map.selected},
+                                 {"lod", QJsonArray{0, 10000}}, {"geom", group.paths}});
+    }
+}
+void installAssets(const QString &folder) {
+    const QString assets = projectRoot();
+    const QString plugins = QDir(folder).filePath("Plugins");
+    if (!QDir().mkpath(QDir(plugins).filePath("JurinasRenderer"))) throw QString("Cannot create Plugins/JurinasRenderer");
+    copyRequired(rendererDll(), QDir(plugins).filePath("JurinasRenderer/JurinasRenderer.dll"));
+    copyTree(QDir(assets).filePath("TopSky"), QDir(plugins).filePath("TopSky"));
+    // This ZME reference shipped with a Japan airspace file; do not apply
+    // RJxx altitude rules to a different ARTCC. Keep the rest of its theme.
+    write(QDir(plugins).filePath("TopSky/TopSkyAirspace.txt"), "; ScopeBridge: no ARTCC-specific TopSky airspace definitions supplied.\n");
+    const QString sym = QDir(assets).filePath("Symbology.txt");
+    if (QFileInfo::exists(sym)) {
+        QDir().mkpath(QDir(folder).filePath("Settings"));
+        copyRequired(sym, QDir(folder).filePath("Settings/Symbology.txt"));
+    } else throw QString("EuroScope symbology preset is missing: %1").arg(sym);
+}
+void voiceAndPositions(const Profile &p, const QString &folder, const QString &stem) {
+    const auto root = json(artccFile(p.path, QFileInfo(p.maps.first().source).dir().absolutePath(), p.artcc))
+                          .value("facility").toObject();
+    QStringList records, voices, profiles;
+    auto center = p.view.value("Center").toObject();
+    if (center.isEmpty()) center = p.view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
+    if (center.isEmpty()) {
+        const auto windows = p.view.value("CurrentPrefSet").toObject().value("Windows").toArray();
+        if (!windows.isEmpty()) center = windows.first().toObject().value("Center").toObject();
+    }
+    const QString lat = dms(center.value("Lat").toDouble(35), true);
+    const QString lon = dms(center.value("Lon").toDouble(-90), false);
+    auto recurse = [&](const auto &self, const QJsonObject &f) -> void {
+        for (const auto &entry : f.value("positions").toArray()) {
+            const auto pos = entry.toObject();
+            const QString callsign = pos.value("callsign").toString();
+            const double hz = pos.value("frequency").toDouble();
+            if (callsign.isEmpty() || hz <= 0) continue;
+            const QString frequency = QString::number(hz / 1000000.0, 'f', 3);
+            const QString name = pos.value("name").toString(f.value("name").toString(callsign));
+            const QStringList parts = callsign.split('_');
+            const QString type = parts.isEmpty() ? "CTR" : parts.last();
+            const QString airport = parts.isEmpty() ? p.artcc : parts.first();
+            const QString sector = parts.size() > 2 ? parts.at(1) : "-";
+            records << QString("%1:%2:%3:SB%4:%5:%6:%7:-:-:2000:2077:%8:%9")
+                           .arg(callsign, name, frequency, QString::number(records.size(), 36).toUpper(), sector, airport, type, lat, lon);
+            voices << "AG:" + callsign + ":" + frequency;
+            profiles << "PROFILE:" + callsign + ":600:6" << "ATIS2:" + name;
+        }
+        for (const auto &child : f.value("childFacilities").toArray()) self(self, child.toObject());
+    };
+    recurse(recurse, root);
+    write(QDir(folder).filePath(stem + ".ese"), "[FREETEXT]\n\n[POSITIONS]\n" + records.join('\n') + "\n\n[SIDSSTARS]\n\n[AIRSPACE]\n");
+    write(QDir(folder).filePath("Settings/Voice.txt"), "VOICE\n" + voices.join('\n') + "\n");
+    write(QDir(folder).filePath("Settings/Profile.txt"), "PROFILE\n" + profiles.join('\n') + "\n");
 }
 struct Result { int maps = 0, segments = 0; QStringList warnings; };
 Result convert(const Profile &p, const QString &dest, const QString &sector) {
@@ -242,44 +411,72 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
     const QString folder = QDir(dest).filePath(safe(p.artcc + "_" + p.name));
     if (!QDir().mkpath(folder)) throw QString("Cannot create %1").arg(folder);
     const QString stem = safe(p.artcc + "_" + p.name);
-    QStringList geo;
     Result result; result.warnings = p.warnings;
     if (sector.isEmpty()) result.warnings << "No legacy sector found: this package contains CRC video maps but no navigation or runway data.";
+    installAssets(folder);
+    voiceAndPositions(p, folder, stem);
+    QJsonArray world;
+    QJsonObject colors, styles;
+    QStringList activeLayerIds;
     for (int i = 0; i < p.maps.size(); ++i) {
         const auto &m = p.maps.at(i);
-        const auto data = json(m.source);
-        int count = 0;
-        const QString label = safe(m.name).left(36) + "_" + QString::number(i + 1);
-        geo << "; " + m.name + " (" + m.id + ")";
-        if (data.value("type").toString() == "FeatureCollection") {
-            for (const auto &feature : data.value("features").toArray())
-                geometry(feature.toObject().value("geometry").toObject(), label, geo, count);
-        } else if (data.value("type").toString() == "Feature") {
-            geometry(data.value("geometry").toObject(), label, geo, count);
-        } else geometry(data, label, geo, count);
-        if (count == 0) result.warnings << "No drawable lines in " + m.name + " (" + m.id + ")";
-        else ++result.maps;
-        result.segments += count;
+        const int before = world.size();
+        buildMapLayers(m, world, colors, styles);
+        if (world.size() == before) {
+            if (m.selected) result.warnings << "Map contains only unsupported point/text features: " + m.name;
+        } else {
+            if (m.selected) ++result.maps;
+            for (int j = before; j < world.size(); ++j) {
+                result.segments += world.at(j).toObject().value("geom").toArray().size();
+                if (m.selected) activeLayerIds << world.at(j).toObject().value("id").toString();
+            }
+        }
     }
-    if (result.segments == 0) throw QString("None of the selected maps contains drawable line geometry.");
+    if (world.isEmpty()) throw QString("None of the available maps contains drawable geometry.");
+    if (activeLayerIds.isEmpty()) result.warnings << "Selected maps have no drawable lines or polygons; all available layers start hidden.";
+    const QString rendererDir = QDir(folder).filePath("Plugins/JurinasRenderer");
+    const QJsonObject groundData{{"version", 1}, {"unit", "deg"}, {"lod_unit", "nm_view_width"},
+                             {"airports", QJsonObject{}}, {"world", world}};
+    const QJsonObject style{{"version", 2}, {"colors", colors}, {"layers", styles}};
+    write(QDir(rendererDir).filePath("ground.json"), QString::fromUtf8(QJsonDocument(groundData).toJson(QJsonDocument::Compact)));
+    write(QDir(rendererDir).filePath("style.json"), QString::fromUtf8(QJsonDocument(style).toJson(QJsonDocument::Indented)));
     QString foundation = baseSector(sector, p.artcc, p.view);
-    if (!foundation.contains(QRegularExpression("(?im)^#define\\s+CRCMap\\s+")))
-        foundation.prepend("#define CRCMap 12632256\n");
-    write(QDir(folder).filePath(stem + ".sct"), foundation + "[GEO]\n" + geo.join("\n") + "\n");
+    write(QDir(folder).filePath(stem + ".sct"), foundation);
     const bool ground = p.display.contains("Cab", Qt::CaseInsensitive) || p.display.contains("Asdex", Qt::CaseInsensitive) || p.display.contains("Said", Qt::CaseInsensitive);
     auto center = p.view.value("Center").toObject();
     if (center.isEmpty()) center = p.view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
+    if (center.isEmpty()) {
+        const auto windows = p.view.value("CurrentPrefSet").toObject().value("Windows").toArray();
+        if (!windows.isEmpty()) center = windows.first().toObject().value("Center").toObject();
+    }
     const double lat = center.value("Lat").toDouble(35), lon = center.value("Lon").toDouble(-90);
     double range = p.view.value("Range").toDouble(p.view.value("CurrentPrefSet").toObject().value("Range").toDouble(100));
+    if (range == 100 && p.view.value("Range").isUndefined()) {
+        const auto windows = p.view.value("CurrentPrefSet").toObject().value("Windows").toArray();
+        if (!windows.isEmpty()) range = windows.first().toObject().value("Range").toDouble(100);
+    }
     if (!std::isfinite(range) || range <= 0) range = 100;
     const double delta = qBound(0.02, range / 60.0, 60.0), lonDelta = delta / qMax(0.25, std::cos(lat * 3.141592653589793 / 180));
-    const QString asr = QString("DisplayTypeName:%1\nDisplayTypeNeedRadarContent:%2\nDisplayTypeGeoReferenced:1\nSECTORFILE:\nSECTORTITLE:%3.sct\nSHOWC:1\nSHOWSB:1\nWINDOWAREA:%4:%5:%6:%7\n")
-        .arg(ground ? "Ground Radar display" : "Standard ES radar screen").arg(ground ? 0 : 1).arg(stem)
+    QString asr = QString("DisplayTypeName:%1\nDisplayTypeNeedRadarContent:%2\nDisplayTypeGeoReferenced:1\nSECTORFILE:\nSECTORTITLE:%3.sct\nSHOWC:1\nSHOWSB:1\n")
+        .arg(ground ? "Ground Radar display" : "Standard ES radar screen").arg(ground ? 0 : 1).arg(stem);
+    for (const auto &id : activeLayerIds) asr += "PLUGIN:Jurina's Renderer:JurinaRender_" + id + ":1\n";
+    asr += QString("WINDOWAREA:%1:%2:%3:%4\n")
         .arg(lat - delta, 0, 'f', 6).arg(lon - lonDelta, 0, 'f', 6)
         .arg(lat + delta, 0, 'f', 6).arg(lon + lonDelta, 0, 'f', 6);
     write(QDir(folder).filePath(stem + ".asr"), asr);
     write(QDir(folder).filePath(stem + ".prf"),
-          "Settings\tsector\t\\" + stem + ".sct\nASRFastKeys\t1\t\\" + stem + ".asr\nRecentFiles\tRecent1\t\\" + stem + ".asr\n");
+          "Settings\tsector\t\\" + stem + ".sct\n"
+          "Settings\tSettingsfileVOICE\t\\Settings\\Voice.txt\n"
+          "Settings\tSettingsfilePROFILE\t\\Settings\\Profile.txt\n"
+          "Plugins\tPlugin0\t\\Plugins\\JurinasRenderer\\JurinasRenderer.dll\n"
+          "Plugins\tPlugin0Display0\tStandard ES radar screen\n"
+          "Plugins\tPlugin0Display1\tGround Radar display\n"
+          "Plugins\tPlugin0Display2\tGround Map\n"
+          "Plugins\tPlugin1\t\\Plugins\\TopSky\\TopSky.dll\n"
+          "Plugins\tPlugin1Display0\tStandard ES radar screen\n"
+          "Plugins\tPlugin1Display1\tGround Radar display\n"
+          "Settings\tSettingsfileSYMBOLOGY\t\\Settings\\Symbology.txt\n"
+          "ASRFastKeys\t1\t\\" + stem + ".asr\nRecentFiles\tRecent1\t\\" + stem + ".asr\n");
     return result;
 }
 }
@@ -338,13 +535,14 @@ int main(int argc, char **argv) {
     };
     auto *profile = field("CRC profile (.json)", local + "/CRC/Profiles", false, "CRC profiles (*.json)");
     auto *maps = field("VideoMaps folder", local + "/CRC/VideoMaps", true);
+    auto *sector = field("Base sector (.sct, optional)", "", false, "EuroScope sectors (*.sct)");
     auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
     layout->addWidget(sources);
     auto *note = new QLabel("Facilities are detected automatically. Select the CRC/VideoMaps folder or its facility subfolder.");
     note->setObjectName("hint"); layout->addWidget(note);
     auto *bar = new QHBoxLayout;
     auto *refresh = new QPushButton("Preview maps"); bar->addStretch(); bar->addWidget(refresh); layout->addLayout(bar);
-    auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Selected video map", "CRC ID", "Source"});
+    auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Video map / default visibility", "CRC ID", "Source"});
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
@@ -356,11 +554,13 @@ int main(int argc, char **argv) {
     auto preview = [&]() -> Profile {
         table->setRowCount(0);
         const Profile p = inspect(profile->text(), maps->text());
-        status->setText(QString("%1 · %2 · %3 map(s)").arg(p.artcc, p.facility).arg(p.maps.size()));
+        int active = 0;
+        for (const auto &map : p.maps) if (map.selected) ++active;
+        status->setText(QString("%1 · %2 · %3 active / %4 available maps").arg(p.artcc, p.facility).arg(active).arg(p.maps.size()));
         log->setPlainText(p.warnings.isEmpty() ? "Profile resolved successfully." : p.warnings.join("\n"));
         for (const auto &map : p.maps) {
             int r = table->rowCount(); table->insertRow(r);
-            table->setItem(r, 0, new QTableWidgetItem(map.name));
+            table->setItem(r, 0, new QTableWidgetItem((map.selected ? "ON   " : "OFF  ") + map.name));
             table->setItem(r, 1, new QTableWidgetItem(map.id));
             table->setItem(r, 2, new QTableWidgetItem(map.source));
         }
@@ -373,7 +573,7 @@ int main(int argc, char **argv) {
     QObject::connect(generate, &QPushButton::clicked, &window, [&] {
         try {
             const auto p = preview();
-            const auto result = convert(p, output->text(), {});
+            const auto result = convert(p, output->text(), sector->text());
             const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
             status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));
             log->setPlainText("Package: " + path + (result.warnings.isEmpty() ? "" : "\n" + result.warnings.join("\n")));
