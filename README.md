@@ -9,9 +9,10 @@ ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable 
 ## Use
 
 1. Unzip the whole `ScopeBridge-Windows-x64.zip` archive and launch `ScopeBridge.exe` (keep `assets/`, the Qt DLLs and `platforms/` beside the executable).
-2. Choose a CRC profile `.json` and its `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
-3. Optionally choose a **Base sector** `.sct` to preserve navigation, airports, runways and other non-GEO sections. If omitted, the sector only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
-4. Click **Preview maps** to see which are initially **ON** and which available maps start **OFF**. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope.
+2. Choose the CRC **Profiles directory** (usually `%LOCALAPPDATA%/CRC/Profiles`) and the `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
+3. Click **Scan profiles**. The scrollable list displays each valid JSON profile's `Name`, sorted alphabetically. Select one profile to preview its video maps and initial ON/OFF states.
+4. Optionally choose a **Base sector** `.sct` to preserve navigation, airports, runways and other non-GEO sections. If omitted, the sector only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
+5. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope. The selected list item determines which profile is converted; only one profile is generated per click.
 
 **CRC:1 tab selection:** ScopeBridge exports the first visible CRC display window saved in the profile (the `CRC:1` page). Within that window, it uses the tab identified by `SelectedDisplayId`; if no saved tab matches, it falls back to the first usable tab. Other CRC windows and tabs are not combined into the export. To export a different tab, select and save it in the CRC profile before generating again.
 

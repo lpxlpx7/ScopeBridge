@@ -21,11 +21,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QFrame>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSignalBlocker>
+#include <QSplitter>
 #include <QTableWidget>
 #include <QTextStream>
 #include <QUrl>
@@ -33,6 +36,7 @@
 #include <oclero/qlementine.hpp>
 #include <oclero/qlementine/style/QlementineStyle.hpp>
 #include <QWidget>
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -71,6 +75,25 @@ QJsonObject json(const QString &path) {
     if (error.error != QJsonParseError::NoError || !doc.isObject())
         throw QString("Invalid JSON in %1: %2").arg(path, error.errorString());
     return doc.object();
+}
+struct ProfileEntry { QString name, artcc, path; };
+QList<ProfileEntry> scanProfiles(const QString &path, QStringList &errors) {
+    const QDir directory(path);
+    if (!directory.exists()) throw QString("Profiles directory does not exist: %1").arg(path);
+    QList<ProfileEntry> entries;
+    for (const auto &file : directory.entryInfoList({"*.json"}, QDir::Files | QDir::Readable, QDir::Name)) {
+        try {
+            const auto data = json(file.absoluteFilePath());
+            const QString name = data.value("Name").toString().trimmed();
+            if (name.isEmpty()) { errors << file.fileName() + ": missing Name"; continue; }
+            entries << ProfileEntry{name, data.value("ArtccId").toString(), file.absoluteFilePath()};
+        } catch (const QString &e) { errors << e; }
+    }
+    std::sort(entries.begin(), entries.end(), [](const ProfileEntry &a, const ProfileEntry &b) {
+        const int compared = QString::compare(a.name, b.name, Qt::CaseInsensitive);
+        return compared == 0 ? a.path < b.path : compared < 0;
+    });
+    return entries;
 }
 void write(const QString &path, const QString &text) {
     QFile file(path);
@@ -526,6 +549,16 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == "--list-profiles") {
+        QCoreApplication cli(argc, argv);
+        try {
+            QStringList errors;
+            const auto entries = scanProfiles(QString::fromLocal8Bit(argv[2]), errors);
+            for (const auto &entry : entries) QTextStream(stdout) << entry.name << "\t" << entry.artcc << "\n";
+            for (const auto &error : errors) QTextStream(stderr) << error << "\n";
+            return 0;
+        } catch (const QString &e) { QTextStream(stderr) << e << "\n"; return 1; }
+    }
     if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == "--convert") {
         QCoreApplication cli(argc, argv);
         try {
@@ -559,8 +592,8 @@ int main(int argc, char **argv) {
     )");
     QWidget window;
     window.setWindowTitle("ScopeBridge " SCOPEBRIDGE_VERSION);
-    window.setMinimumSize(880, 700);
-    window.resize(1020, 780);
+    window.setMinimumSize(920, 720);
+    window.resize(1100, 820);
     auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(28, 24, 28, 22); layout->setSpacing(16);
     auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); layout->addWidget(eyebrow);
     auto *heading = new QHBoxLayout;
@@ -585,7 +618,7 @@ int main(int argc, char **argv) {
         });
         return edit;
     };
-    auto *profile = field("CRC profile (.json)", local + "/CRC/Profiles", false, "CRC profiles (*.json)");
+    auto *profiles = field("CRC Profiles directory", local + "/CRC/Profiles", true);
     auto *maps = field("VideoMaps folder", local + "/CRC/VideoMaps", true);
     auto *sector = field("Base sector (.sct, optional)", "", false, "EuroScope sectors (*.sct)");
     auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
@@ -593,37 +626,100 @@ int main(int argc, char **argv) {
     auto *note = new QLabel("Facility data is detected automatically. Use the VideoMaps root or a single ARTCC folder.");
     note->setObjectName("hint"); layout->addWidget(note);
     auto *bar = new QHBoxLayout;
-    auto *previewTitle = new QLabel("02  /  Map preview"); bar->addWidget(previewTitle); bar->addStretch();
-    auto *refresh = new QPushButton("Preview maps"); bar->addWidget(refresh); layout->addLayout(bar);
-    auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Video map / default visibility", "CRC ID", "Source"});
+    auto *chooseTitle = new QLabel("02  /  Choose a profile"); bar->addWidget(chooseTitle); bar->addStretch();
+    auto *scan = new QPushButton("Scan profiles"); bar->addWidget(scan); layout->addLayout(bar);
+    auto *panels = new QSplitter(Qt::Horizontal);
+    panels->setChildrenCollapsible(false);
+    auto *profilePanel = new QWidget;
+    auto *profileLayout = new QVBoxLayout(profilePanel);
+    profileLayout->setContentsMargins(0, 0, 6, 0);
+    auto *profileCount = new QLabel("Scan the directory to find saved profiles.");
+    profileCount->setObjectName("hint"); profileLayout->addWidget(profileCount);
+    auto *profileList = new QListWidget;
+    profileList->setSelectionMode(QAbstractItemView::SingleSelection);
+    profileList->setAlternatingRowColors(true);
+    profileLayout->addWidget(profileList, 1);
+    panels->addWidget(profilePanel);
+    auto *mapPanel = new QWidget;
+    auto *mapLayout = new QVBoxLayout(mapPanel);
+    mapLayout->setContentsMargins(6, 0, 0, 0);
+    auto *mapBar = new QHBoxLayout;
+    mapBar->addWidget(new QLabel("03  /  Video maps")); mapBar->addStretch();
+    auto *refresh = new QPushButton("Refresh maps"); mapBar->addWidget(refresh);
+    mapLayout->addLayout(mapBar);
+    auto *table = new QTableWidget(0, 2); table->setHorizontalHeaderLabels({"Video map / default visibility", "CRC ID"});
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     table->setAlternatingRowColors(true);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers); layout->addWidget(table, 1);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers); mapLayout->addWidget(table, 1);
+    panels->addWidget(mapPanel);
+    panels->setStretchFactor(0, 1);
+    panels->setStretchFactor(1, 2);
+    panels->setSizes({300, 700});
+    layout->addWidget(panels, 1);
     auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setMaximumHeight(110); layout->addWidget(log);
-    auto *actions = new QHBoxLayout; auto *status = new QLabel("Select a CRC profile to begin."); status->setObjectName("hint");
+    auto *actions = new QHBoxLayout; auto *status = new QLabel("Scan a Profiles directory to begin."); status->setObjectName("hint");
     auto *generate = new QPushButton("Generate EuroScope sector"); generate->setObjectName("primary");
+    generate->setEnabled(false);
     generate->setDefault(true);
     actions->addWidget(status, 1); actions->addWidget(generate); layout->addLayout(actions);
     auto *licenseNotice = new QLabel("GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">License</a> · UI powered by Qlementine (MIT)");
     licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); layout->addWidget(licenseNotice);
     auto preview = [&]() -> Profile {
+        auto *selected = profileList->currentItem();
+        if (!selected) throw QString("Select a profile from the list first.");
         table->setRowCount(0);
-        const Profile p = inspect(profile->text(), maps->text());
+        const Profile p = inspect(selected->data(Qt::UserRole).toString(), maps->text());
         int active = 0;
         for (const auto &map : p.maps) if (map.selected) ++active;
         status->setText(QString("%1 · %2 · %3 active / %4 available maps").arg(p.artcc, p.facility).arg(active).arg(p.maps.size()));
         log->setPlainText(p.warnings.isEmpty() ? "Profile resolved successfully." : p.warnings.join("\n"));
         for (const auto &map : p.maps) {
             int r = table->rowCount(); table->insertRow(r);
-            table->setItem(r, 0, new QTableWidgetItem((map.selected ? "ON   " : "OFF  ") + map.name));
+            auto *item = new QTableWidgetItem((map.selected ? "ON   " : "OFF  ") + map.name);
+            item->setToolTip(map.source);
+            table->setItem(r, 0, item);
             table->setItem(r, 1, new QTableWidgetItem(map.id));
-            table->setItem(r, 2, new QTableWidgetItem(map.source));
         }
         return p;
     };
+    QObject::connect(scan, &QPushButton::clicked, &window, [&] {
+        QSignalBlocker blocked(profileList);
+        profileList->clear(); table->setRowCount(0);
+        generate->setEnabled(false);
+        QStringList errors;
+        QList<ProfileEntry> entries;
+        try { entries = scanProfiles(profiles->text(), errors); }
+        catch (const QString &e) {
+            profileCount->setText("Directory not found.");
+            log->setPlainText(e);
+            status->setText("No profiles available.");
+            return;
+        }
+        for (const auto &entry : entries) {
+            auto *item = new QListWidgetItem(entry.name);
+            item->setData(Qt::UserRole, entry.path);
+            item->setToolTip(entry.artcc.isEmpty() ? entry.name : entry.artcc + "  /  " + entry.name);
+            profileList->addItem(item);
+        }
+        profileCount->setText(QString("%1 profile(s) found").arg(entries.size()));
+        log->setPlainText(errors.isEmpty() ? "Select a profile to preview its video maps."
+                                            : QString("Skipped %1 invalid file(s):\n").arg(errors.size()) + errors.join("\n"));
+        status->setText(entries.isEmpty() ? "No named profiles found." : "Select a profile to continue.");
+    });
+    QObject::connect(profiles, &QLineEdit::textChanged, &window, [&] {
+        profileList->clear(); table->setRowCount(0);
+        profileCount->setText("Scan the directory to find saved profiles.");
+        generate->setEnabled(false);
+        status->setText("Scan the selected Profiles directory.");
+    });
+    QObject::connect(profileList, &QListWidget::currentItemChanged, &window, [&](QListWidgetItem *current) {
+        generate->setEnabled(current != nullptr);
+        if (!current) { table->setRowCount(0); return; }
+        try { preview(); }
+        catch (const QString &e) { table->setRowCount(0); status->setText("Unable to preview maps."); log->setPlainText(e); }
+    });
     QObject::connect(refresh, &QPushButton::clicked, &window, [&] {
         try { preview(); }
         catch (const QString &e) { status->setText("Cannot preview maps."); log->setPlainText(e); }
