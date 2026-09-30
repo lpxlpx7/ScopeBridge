@@ -27,7 +27,7 @@ The output folder contains:
 
 The renderer displays each available video map in its layer panel with a readable English name. The profile's selected STARS maps or enabled ERAM filters start visible; all other available maps start hidden and can be enabled from the panel. If a saved STARS number no longer resolves, all available maps start hidden rather than being activated automatically. GeoJSON line and polygon geometry (including filled polygons) is converted from longitude/latitude into the renderer's latitude/longitude format. The bundled renderer is built from the sibling `plugin/src/CANGroundRender.cpp` with world-layer polygon drawing enabled. `style.json` uses the source feature colors when provided and the ZME example's video color for uncolored features. CRC-only symbols and text cannot be recreated from these features. The TopSky visual theme comes from the ZME example; its Japan-specific airspace file is replaced with an empty placeholder so RJxx rules are not applied to another ARTCC. The symbology preset is likewise the ZME example's palette, not a CRC-specific export.
 
-The renderer's pixel compositing path preserves the real radar background while changing layer opacity; the standalone opacity fix is provided in [`renderer-opacity.patch`](renderer-opacity.patch).
+The renderer's pixel compositing path preserves the real radar background while changing layer opacity; the standalone opacity fix is provided in [`renderer-opacity.patch`](renderer-opacity.patch). The renderer panel includes a vertical scrollbar with up/down controls for long map lists.
 
 ## ARTCC compatibility
 
