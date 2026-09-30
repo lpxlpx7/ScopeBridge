@@ -358,8 +358,14 @@ QString baseSector(const QString &path, const QString &artcc, const QJsonObject 
 struct XPlaneNav {
     QString fixes, vors, ndbs, airways, procedures;
     int fixCount = 0, vorCount = 0, ndbCount = 0, airwayCount = 0, procedureCount = 0;
+    QSet<QString> regionalIds;
 };
-struct XPlaneOptions { bool fixes=false, navaids=false, airways=false, procedures=false; };
+struct XPlaneOptions { bool fixes=false, navaids=false, airways=false, procedures=false; bool areaOnly=true; double centerLat=35, centerLon=-90, rangeNm=100; };
+bool inNavArea(double lat, double lon, const XPlaneOptions &o) {
+    const double latDelta = o.rangeNm / 60.0;
+    const double lonDelta = latDelta / std::max(0.25, std::cos(o.centerLat * 3.141592653589793 / 180.0));
+    return !o.areaOnly || (lat >= o.centerLat-latDelta && lat <= o.centerLat+latDelta && lon >= o.centerLon-lonDelta && lon <= o.centerLon+lonDelta);
+}
 QStringList dataLines(const QString &path) {
     QFile f(path); if (!f.open(QIODevice::ReadOnly)) return {};
     return QString::fromUtf8(f.readAll()).split('\n');
@@ -373,15 +379,17 @@ XPlaneNav importXPlane(const QString &root, const XPlaneOptions &options) {
         const auto f = line.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (f.size() < 3 || !coordinate.match(f[0]).hasMatch() || !coordinate.match(f[1]).hasMatch()) continue;
         const double lat = f[0].toDouble(), lon = f[1].toDouble();
-        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180 || !inNavArea(lat, lon, options)) continue;
         const QString id = f[2]; if (id.isEmpty()) continue;
+        out.regionalIds.insert(id);
         out.fixes += id + " " + dms(lat, true) + " " + dms(lon, false) + "\n"; ++out.fixCount;
     }
     if (options.navaids) for (const auto &line : dataLines(dir.filePath("earth_nav.dat"))) {
         const auto f = line.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (f.size() < 8 || !f[0].toInt() || !coordinate.match(f[1]).hasMatch() || !coordinate.match(f[2]).hasMatch()) continue;
         const int type = f[0].toInt(); const double lat=f[1].toDouble(), lon=f[2].toDouble();
-        const QString id=f[7]; if (id.isEmpty()) continue;
+        const QString id=f[7]; if (id.isEmpty() || !inNavArea(lat, lon, options)) continue;
+        out.regionalIds.insert(id);
         if (type == 3 || type == 12) { out.vors += id + " " + QString::number(f[4].toDouble()/100.0,'f',2) + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.vorCount; }
         else if (type == 2 || type == 13) { out.ndbs += id + " " + f[4] + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.ndbCount; }
     }
@@ -390,6 +398,7 @@ XPlaneNav importXPlane(const QString &root, const XPlaneOptions &options) {
         if (f.size() < 12) continue;
         const QString route=f.last(), from=f[0], to=f[3];
         if (route.isEmpty() || from.isEmpty() || to.isEmpty()) continue;
+        if (options.areaOnly && (!out.regionalIds.contains(from) || !out.regionalIds.contains(to))) continue;
         out.airways += route + " " + from + " " + from + " " + to + " " + to + "\n"; ++out.airwayCount;
     }
     const QDir cifp(dir.filePath("CIFP"));
@@ -579,8 +588,21 @@ Result convert(const Profile &p, const QString &dest, const QString &sector, con
     write(QDir(rendererDir).filePath("ground.json"), QString::fromUtf8(QJsonDocument(groundData).toJson(QJsonDocument::Compact)));
     write(QDir(rendererDir).filePath("style.json"), QString::fromUtf8(QJsonDocument(style).toJson(QJsonDocument::Indented)));
     QString foundation = baseSector(sector, p.artcc, p.view);
-    if (!xplane.isEmpty() && (navOptions.fixes || navOptions.navaids || navOptions.airways || navOptions.procedures))
-        foundation = addXPlaneNavigation(foundation, importXPlane(xplane, navOptions));
+    if (!xplane.isEmpty() && (navOptions.fixes || navOptions.navaids || navOptions.airways || navOptions.procedures)) {
+        XPlaneOptions regional = navOptions;
+        auto navCenter = p.view.value("Center").toObject();
+        if (navCenter.isEmpty()) navCenter = p.view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
+        if (navCenter.isEmpty()) {
+            const auto windows = p.view.value("CurrentPrefSet").toObject().value("Windows").toArray();
+            if (!windows.isEmpty()) navCenter = windows.first().toObject().value("Center").toObject();
+        }
+        regional.centerLat = navCenter.value("Lat").toDouble(35);
+        regional.centerLon = navCenter.value("Lon").toDouble(-90);
+        double viewRange = p.view.value("Range").toDouble(p.view.value("CurrentPrefSet").toObject().value("Range").toDouble(100));
+        if (!std::isfinite(viewRange) || viewRange <= 0) viewRange = 100;
+        regional.rangeNm = qBound(80.0, viewRange * 2.0, 500.0);
+        foundation = addXPlaneNavigation(foundation, importXPlane(xplane, regional));
+    }
     write(QDir(folder).filePath(stem + ".sct"), foundation);
     const bool ground = p.display.contains("Cab", Qt::CaseInsensitive) || p.display.contains("Asdex", Qt::CaseInsensitive) || p.display.contains("Said", Qt::CaseInsensitive);
     auto center = p.view.value("Center").toObject();
@@ -716,7 +738,9 @@ int main(int argc, char **argv) {
     auto *importNavaids = new QCheckBox("VOR / NDB");
     auto *importAirways = new QCheckBox("Airways");
     auto *importProcedures = new QCheckBox("CIFP summary");
+    auto *areaOnly = new QCheckBox("Profile area only"); areaOnly->setChecked(true); areaOnly->setToolTip("Filter fixes and navaids to the selected CRC display center and range.");
     for (auto *box : {importFixes, importNavaids, importAirways, importProcedures}) navOptions->addWidget(box);
+    navOptions->addWidget(areaOnly);
     navOptions->addStretch(); layout->addLayout(navOptions);
     auto *bar = new QHBoxLayout;
     auto *chooseTitle = new QLabel("02  /  Choose a profile"); bar->addWidget(chooseTitle); bar->addStretch();
@@ -848,6 +872,13 @@ int main(int argc, char **argv) {
             const QString baseSector = sectorList->currentItem()
                 ? sectorList->currentItem()->data(Qt::UserRole).toString() : QString();
             XPlaneOptions navOptionsValue{importFixes->isChecked(), importNavaids->isChecked(), importAirways->isChecked(), importProcedures->isChecked()};
+            const auto view = p.view;
+            auto center = view.value("Center").toObject();
+            if (center.isEmpty()) center = view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
+            navOptionsValue.areaOnly = areaOnly->isChecked();
+            navOptionsValue.centerLat = center.value("Lat").toDouble(35);
+            navOptionsValue.centerLon = center.value("Lon").toDouble(-90);
+            navOptionsValue.rangeNm = view.value("Range").toDouble(view.value("CurrentPrefSet").toObject().value("Range").toDouble(100));
             const auto result = convert(p, output->text(), baseSector, xplane->text(), navOptionsValue);
             const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
             status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));

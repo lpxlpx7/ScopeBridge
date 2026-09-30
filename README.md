@@ -37,7 +37,7 @@ Generated `.ese` positions and frequencies come from CRC facility data; position
 
 ## X-Plane Custom Data navigation
 
-The optional **X-Plane Custom Data** field has four independent checkboxes, all disabled by default to avoid generating huge sectors: **Fixes**, **VOR / NDB**, **Airways**, and **CIFP summary**. Only checked categories are read and written. `earth_fix.dat`, `earth_nav.dat`, and `earth_awy.dat` are converted to fixes, navaids, and airway records. `CIFP/*.dat` is scanned and its procedure counts are recorded as comments; detailed SID/STAR/approach route conversion requires a dedicated EuroScope procedure mapping. The Custom Data folder is read-only and is never copied or modified. The GUI also includes a live profile search field and larger scrollable profile/sector selectors.
+The optional **X-Plane Custom Data** field has four independent checkboxes, all disabled by default to avoid generating huge sectors: **Fixes**, **VOR / NDB**, **Airways**, and **CIFP summary**. **Profile area only** is enabled by default; when selected, fixes and navaids are filtered to twice the CRC display range around the selected profile center, limited to 80–500 NM. Airways are kept when both endpoints are in that regional navigation set. Only checked categories are read and written. `earth_fix.dat`, `earth_nav.dat`, and `earth_awy.dat` are converted to regional fixes, navaids, and airway records. `CIFP/*.dat` is scanned and its procedure counts are recorded as comments; detailed SID/STAR/approach route conversion requires a dedicated EuroScope procedure mapping. The Custom Data folder is read-only and is never copied or modified. The GUI also includes a live profile search field and larger scrollable profile/sector selectors.
 
 ## Build
 
