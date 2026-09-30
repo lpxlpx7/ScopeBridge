@@ -6,6 +6,7 @@
 #include <QBoxLayout>
 #include <QCoreApplication>
 #include <QColor>
+#include <QCheckBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -358,16 +359,17 @@ struct XPlaneNav {
     QString fixes, vors, ndbs, airways, procedures;
     int fixCount = 0, vorCount = 0, ndbCount = 0, airwayCount = 0, procedureCount = 0;
 };
+struct XPlaneOptions { bool fixes=false, navaids=false, airways=false, procedures=false; };
 QStringList dataLines(const QString &path) {
     QFile f(path); if (!f.open(QIODevice::ReadOnly)) return {};
     return QString::fromUtf8(f.readAll()).split('\n');
 }
-XPlaneNav importXPlane(const QString &root) {
+XPlaneNav importXPlane(const QString &root, const XPlaneOptions &options) {
     XPlaneNav out;
     const QDir dir(root);
     if (!dir.exists()) return out;
     const QRegularExpression coordinate("^-?\\d+(?:\\.\\d+)?$");
-    for (const auto &line : dataLines(dir.filePath("earth_fix.dat"))) {
+    if (options.fixes) for (const auto &line : dataLines(dir.filePath("earth_fix.dat"))) {
         const auto f = line.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (f.size() < 3 || !coordinate.match(f[0]).hasMatch() || !coordinate.match(f[1]).hasMatch()) continue;
         const double lat = f[0].toDouble(), lon = f[1].toDouble();
@@ -375,7 +377,7 @@ XPlaneNav importXPlane(const QString &root) {
         const QString id = f[2]; if (id.isEmpty()) continue;
         out.fixes += id + " " + dms(lat, true) + " " + dms(lon, false) + "\n"; ++out.fixCount;
     }
-    for (const auto &line : dataLines(dir.filePath("earth_nav.dat"))) {
+    if (options.navaids) for (const auto &line : dataLines(dir.filePath("earth_nav.dat"))) {
         const auto f = line.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (f.size() < 8 || !f[0].toInt() || !coordinate.match(f[1]).hasMatch() || !coordinate.match(f[2]).hasMatch()) continue;
         const int type = f[0].toInt(); const double lat=f[1].toDouble(), lon=f[2].toDouble();
@@ -383,7 +385,7 @@ XPlaneNav importXPlane(const QString &root) {
         if (type == 3 || type == 12) { out.vors += id + " " + QString::number(f[4].toDouble()/100.0,'f',2) + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.vorCount; }
         else if (type == 2 || type == 13) { out.ndbs += id + " " + f[4] + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.ndbCount; }
     }
-    for (const auto &line : dataLines(dir.filePath("earth_awy.dat"))) {
+    if (options.airways) for (const auto &line : dataLines(dir.filePath("earth_awy.dat"))) {
         const auto f=line.trimmed().split(QRegularExpression("\\s+"),Qt::SkipEmptyParts);
         if (f.size() < 12) continue;
         const QString route=f.last(), from=f[0], to=f[3];
@@ -391,7 +393,7 @@ XPlaneNav importXPlane(const QString &root) {
         out.airways += route + " " + from + " " + from + " " + to + " " + to + "\n"; ++out.airwayCount;
     }
     const QDir cifp(dir.filePath("CIFP"));
-    if (cifp.exists()) {
+    if (options.procedures && cifp.exists()) {
         for (const auto &file : cifp.entryInfoList({"*.dat"}, QDir::Files | QDir::Readable)) {
             int sid=0, star=0, app=0;
             for (const auto &line : dataLines(file.absoluteFilePath())) {
@@ -542,7 +544,7 @@ void voiceAndPositions(const Profile &p, const QString &folder, const QString &s
     write(QDir(folder).filePath("Settings/Profile.txt"), "PROFILE\n" + profiles.join('\n') + "\n");
 }
 struct Result { int maps = 0, segments = 0; QStringList warnings; };
-Result convert(const Profile &p, const QString &dest, const QString &sector, const QString &xplane = {}) {
+Result convert(const Profile &p, const QString &dest, const QString &sector, const QString &xplane = {}, const XPlaneOptions &navOptions = {}) {
     if (p.maps.isEmpty()) throw QString("No maps are available for %1. Check the selected display and CRC data.").arg(p.name);
     const QString folder = QDir(dest).filePath(safe(p.artcc + "_" + p.name));
     if (!QDir().mkpath(folder)) throw QString("Cannot create %1").arg(folder);
@@ -577,7 +579,8 @@ Result convert(const Profile &p, const QString &dest, const QString &sector, con
     write(QDir(rendererDir).filePath("ground.json"), QString::fromUtf8(QJsonDocument(groundData).toJson(QJsonDocument::Compact)));
     write(QDir(rendererDir).filePath("style.json"), QString::fromUtf8(QJsonDocument(style).toJson(QJsonDocument::Indented)));
     QString foundation = baseSector(sector, p.artcc, p.view);
-    if (!xplane.isEmpty()) foundation = addXPlaneNavigation(foundation, importXPlane(xplane));
+    if (!xplane.isEmpty() && (navOptions.fixes || navOptions.navaids || navOptions.airways || navOptions.procedures))
+        foundation = addXPlaneNavigation(foundation, importXPlane(xplane, navOptions));
     write(QDir(folder).filePath(stem + ".sct"), foundation);
     const bool ground = p.display.contains("Cab", Qt::CaseInsensitive) || p.display.contains("Asdex", Qt::CaseInsensitive) || p.display.contains("Said", Qt::CaseInsensitive);
     auto center = p.view.value("Center").toObject();
@@ -672,8 +675,8 @@ int main(int argc, char **argv) {
     )");
     QWidget window;
     window.setWindowTitle("ScopeBridge " SCOPEBRIDGE_VERSION);
-    window.setMinimumSize(920, 720);
-    window.resize(1100, 820);
+    window.setMinimumSize(980, 760);
+    window.resize(1240, 900);
     auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(28, 24, 28, 22); layout->setSpacing(16);
     auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); layout->addWidget(eyebrow);
     auto *heading = new QHBoxLayout;
@@ -706,6 +709,15 @@ int main(int argc, char **argv) {
     layout->addWidget(sources);
     auto *note = new QLabel("Facility data is detected automatically. Use the VideoMaps root or a single ARTCC folder.");
     note->setObjectName("hint"); layout->addWidget(note);
+    auto *navTitle = new QLabel("X-Plane navigation import (all disabled by default)");
+    navTitle->setObjectName("hint"); layout->addWidget(navTitle);
+    auto *navOptions = new QHBoxLayout;
+    auto *importFixes = new QCheckBox("Fixes");
+    auto *importNavaids = new QCheckBox("VOR / NDB");
+    auto *importAirways = new QCheckBox("Airways");
+    auto *importProcedures = new QCheckBox("CIFP summary");
+    for (auto *box : {importFixes, importNavaids, importAirways, importProcedures}) navOptions->addWidget(box);
+    navOptions->addStretch(); layout->addLayout(navOptions);
     auto *bar = new QHBoxLayout;
     auto *chooseTitle = new QLabel("02  /  Choose a profile"); bar->addWidget(chooseTitle); bar->addStretch();
     auto *scan = new QPushButton("Scan profiles"); bar->addWidget(scan); layout->addLayout(bar);
@@ -716,6 +728,9 @@ int main(int argc, char **argv) {
     profileLayout->setContentsMargins(0, 0, 6, 0);
     auto *profileCount = new QLabel("Scan the directory to find saved profiles.");
     profileCount->setObjectName("hint"); profileLayout->addWidget(profileCount);
+    auto *profileSearch = new QLineEdit;
+    profileSearch->setPlaceholderText("Search profiles...");
+    profileLayout->addWidget(profileSearch);
     auto *profileList = new QListWidget;
     profileList->setSelectionMode(QAbstractItemView::SingleSelection);
     profileList->setAlternatingRowColors(true);
@@ -725,7 +740,7 @@ int main(int argc, char **argv) {
     auto *sectorList = new QListWidget;
     sectorList->setSelectionMode(QAbstractItemView::SingleSelection);
     sectorList->setAlternatingRowColors(true);
-    sectorList->setMaximumHeight(150);
+    sectorList->setMaximumHeight(130);
     profileLayout->addWidget(sectorList);
     panels->addWidget(profilePanel);
     auto *mapPanel = new QWidget;
@@ -744,7 +759,7 @@ int main(int argc, char **argv) {
     panels->addWidget(mapPanel);
     panels->setStretchFactor(0, 1);
     panels->setStretchFactor(1, 2);
-    panels->setSizes({300, 700});
+    panels->setSizes({470, 740});
     layout->addWidget(panels, 1);
     auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setMaximumHeight(110); layout->addWidget(log);
     auto *actions = new QHBoxLayout; auto *status = new QLabel("Scan a Profiles directory to begin."); status->setObjectName("hint");
@@ -790,6 +805,7 @@ int main(int argc, char **argv) {
             item->setData(Qt::UserRole, entry.path);
             item->setToolTip(entry.artcc.isEmpty() ? entry.name : entry.artcc + "  /  " + entry.name);
             profileList->addItem(item);
+            item->setHidden(!entry.name.contains(profileSearch->text(), Qt::CaseInsensitive));
         }
         const QDir sectorDir(sectorDirectory->text());
         for (const auto &file : sectorDir.entryInfoList({"*.sct"}, QDir::Files | QDir::Readable, QDir::Name)) {
@@ -802,6 +818,10 @@ int main(int argc, char **argv) {
         log->setPlainText(errors.isEmpty() ? "Select a profile to preview its video maps."
                                             : QString("Skipped %1 invalid file(s):\n").arg(errors.size()) + errors.join("\n"));
         status->setText(entries.isEmpty() ? "No named profiles found." : "Select a profile to continue.");
+    });
+    QObject::connect(profileSearch, &QLineEdit::textChanged, &window, [=](const QString &query) {
+        for (int i = 0; i < profileList->count(); ++i)
+            profileList->item(i)->setHidden(!profileList->item(i)->text().contains(query, Qt::CaseInsensitive));
     });
     QObject::connect(profiles, &QLineEdit::textChanged, &window, [&] {
         profileList->clear(); sectorList->clear(); table->setRowCount(0);
@@ -827,7 +847,8 @@ int main(int argc, char **argv) {
             const auto p = preview();
             const QString baseSector = sectorList->currentItem()
                 ? sectorList->currentItem()->data(Qt::UserRole).toString() : QString();
-            const auto result = convert(p, output->text(), baseSector, xplane->text());
+            XPlaneOptions navOptionsValue{importFixes->isChecked(), importNavaids->isChecked(), importAirways->isChecked(), importProcedures->isChecked()};
+            const auto result = convert(p, output->text(), baseSector, xplane->text(), navOptionsValue);
             const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
             status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));
             log->setPlainText("Package: " + path + (result.warnings.isEmpty() ? "" : "\n" + result.warnings.join("\n")));
