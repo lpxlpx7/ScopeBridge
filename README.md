@@ -35,6 +35,10 @@ The facility is selected from the profile's `ArtccId`, not hard-coded to ZME. Sc
 
 Generated `.ese` positions and frequencies come from CRC facility data; position coordinates use the selected profile view center because CRC positions do not supply per-position coordinates. CRC profile/map data cannot reproduce the full original ZME package's external NAV/TopSky/other-plugin setup. Source files are never changed.
 
+## X-Plane Custom Data navigation
+
+The optional **X-Plane Custom Data** field imports text navigation data into the generated sector: `earth_fix.dat`, `earth_nav.dat`, and `earth_awy.dat` are converted to fixes, VOR/NDB records, and airway records. `CIFP/*.dat` is scanned and its procedure counts are recorded as comments; detailed SID/STAR/approach route conversion requires a dedicated EuroScope procedure mapping. The Custom Data folder is read-only and is never copied or modified.
+
 ## Build
 
 Build the Qt 6 / C++17 app using the MinGW toolchain compatible with your Qt installation. The project includes only its own source; package assets are copied from the surrounding Jurinas Renderer workspace. On the current development machine:
@@ -49,4 +53,4 @@ The CMake build downloads Qlementine from its pinned v1.4.2 commit on GitHub. `Q
 
 The renderer DLL must be built **as x86** using `plugin/build.bat` in a Visual Studio x86 Native Tools environment; the Qt GUI is x64. For a standalone checkout, apply [`renderer-world-polygons.patch`](renderer-world-polygons.patch) to the matching renderer workspace before building; it includes layer defaults and UTF-8 panel labels. Copy the resulting `plugin/bin/JurinasRenderer.dll` to `build/release/assets/JurinasRenderer.dll`, and the workspace's `ZME/Plugins/TopSky` and `ZME/Settings/Symbology.txt` to `build/release/assets/TopSky` and `build/release/assets/Symbology.txt`. Deploy Qt with `windeployqt` and copy `build/ScopeBridge.exe` into `build/release` before distributing that directory. The app reports a missing asset rather than silently creating a broken PRF.
 
-For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct]`.
+For batch use: `ScopeBridge.exe --convert <profile.json> <output-directory> [VideoMaps-folder] [base-sector.sct] [X-Plane-Custom-Data]`.
