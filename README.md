@@ -2,7 +2,7 @@
 
 ScopeBridge converts a CRC profile and GeoJSON video maps into a EuroScope package using **Jurina's Renderer**. The Windows release folder contains `ScopeBridge.exe`, the Qt runtime, a precompiled 32-bit `JurinasRenderer.dll`, TopSky files, and the example EuroScope symbology preset.
 
-The desktop interface uses [Qlementine](https://github.com/oclero/qlementine) v1.4.2 (MIT license) with a bundled dark theme. The complete portable archive includes `QLEMENTINE-LICENSE.txt`; the Qt GUI is statically linked with Qlementine and still dynamically links to Qt.
+The desktop interface uses [Qlementine](https://github.com/oclero/qlementine) v1.4.2 (MIT license) with a bundled dark theme and requests San Francisco UI fonts, falling back to Segoe UI when San Francisco is not installed. The complete portable archive includes `QLEMENTINE-LICENSE.txt`; the Qt GUI is statically linked with Qlementine and still dynamically links to Qt.
 
 ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable archive includes the license text; bundled Qt and TopSky files retain their own licenses. The renderer source is maintained in the sibling `plugin/` workspace, with the ScopeBridge-specific changes provided as a [patch](renderer-world-polygons.patch).
 

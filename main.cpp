@@ -21,6 +21,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QFrame>
+#include <QFont>
+#include <QFontDatabase>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMap>
@@ -431,6 +433,15 @@ void installAssets(const QString &folder) {
         QDir().mkpath(QDir(folder).filePath("Settings"));
         copyRequired(sym, QDir(folder).filePath("Settings/Symbology.txt"));
     } else throw QString("EuroScope symbology preset is missing: %1").arg(sym);
+    const QString general =
+        "; ScopeBridge default radar settings\n"
+        "; Transition altitude / level: 18000 ft / FL180\n"
+        "m_TransitionAltitude:18000\n"
+        "m_TransitionLevel:180\n"
+        "; Default one-minute line display\n"
+        "m_OneMinuteLine:1\n"
+        "m_OneMinuteLineLength:1\n";
+    write(QDir(folder).filePath("Settings/General.txt"), general);
 }
 void voiceAndPositions(const Profile &p, const QString &folder, const QString &stem) {
     const auto root = json(artccFile(p.path, QFileInfo(p.maps.first().source).dir().absolutePath(), p.artcc))
@@ -535,6 +546,7 @@ Result convert(const Profile &p, const QString &dest, const QString &sector) {
           "Settings\tsector\t\\" + stem + ".sct\n"
           "Settings\tSettingsfileVOICE\t\\Settings\\Voice.txt\n"
           "Settings\tSettingsfilePROFILE\t\\Settings\\Profile.txt\n"
+          "Settings\tSettingsfile\t\\Settings\\General.txt\n"
           "Plugins\tPlugin0\t\\Plugins\\JurinasRenderer\\JurinasRenderer.dll\n"
           "Plugins\tPlugin0Display0\tStandard ES radar screen\n"
           "Plugins\tPlugin0Display1\tGround Radar display\n"
@@ -583,6 +595,10 @@ int main(int argc, char **argv) {
     auto *style = new oclero::qlementine::QlementineStyle(&app);
     QApplication::setStyle(style);
     style->setThemeJsonPath(":/scopebridge/dark.json");
+    QFont interfaceFont("SF Pro Display");
+    if (!QFontDatabase().families().contains("SF Pro Display")) interfaceFont.setFamily("Segoe UI");
+    interfaceFont.setPointSize(10);
+    app.setFont(interfaceFont);
     app.setStyleSheet(R"(
         QLabel#title { font-size:28px; font-weight:700; }
         QLabel#eyebrow { font-size:11px; font-weight:700; color:#78baff; }
@@ -620,7 +636,7 @@ int main(int argc, char **argv) {
     };
     auto *profiles = field("CRC Profiles directory", local + "/CRC/Profiles", true);
     auto *maps = field("VideoMaps folder", local + "/CRC/VideoMaps", true);
-    auto *sector = field("Base sector (.sct, optional)", "", false, "EuroScope sectors (*.sct)");
+    auto *sectorDirectory = field("Sector files directory", QDir::homePath(), true);
     auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
     layout->addWidget(sources);
     auto *note = new QLabel("Facility data is detected automatically. Use the VideoMaps root or a single ARTCC folder.");
@@ -639,6 +655,13 @@ int main(int argc, char **argv) {
     profileList->setSelectionMode(QAbstractItemView::SingleSelection);
     profileList->setAlternatingRowColors(true);
     profileLayout->addWidget(profileList, 1);
+    auto *sectorLabel = new QLabel("Base sector (optional)");
+    profileLayout->addWidget(sectorLabel);
+    auto *sectorList = new QListWidget;
+    sectorList->setSelectionMode(QAbstractItemView::SingleSelection);
+    sectorList->setAlternatingRowColors(true);
+    sectorList->setMaximumHeight(150);
+    profileLayout->addWidget(sectorList);
     panels->addWidget(profilePanel);
     auto *mapPanel = new QWidget;
     auto *mapLayout = new QVBoxLayout(mapPanel);
@@ -686,7 +709,7 @@ int main(int argc, char **argv) {
     };
     QObject::connect(scan, &QPushButton::clicked, &window, [&] {
         QSignalBlocker blocked(profileList);
-        profileList->clear(); table->setRowCount(0);
+        profileList->clear(); sectorList->clear(); table->setRowCount(0);
         generate->setEnabled(false);
         QStringList errors;
         QList<ProfileEntry> entries;
@@ -703,16 +726,26 @@ int main(int argc, char **argv) {
             item->setToolTip(entry.artcc.isEmpty() ? entry.name : entry.artcc + "  /  " + entry.name);
             profileList->addItem(item);
         }
+        const QDir sectorDir(sectorDirectory->text());
+        for (const auto &file : sectorDir.entryInfoList({"*.sct"}, QDir::Files | QDir::Readable, QDir::Name)) {
+            auto *item = new QListWidgetItem(file.fileName());
+            item->setData(Qt::UserRole, file.absoluteFilePath());
+            item->setToolTip(file.absoluteFilePath());
+            sectorList->addItem(item);
+        }
         profileCount->setText(QString("%1 profile(s) found").arg(entries.size()));
         log->setPlainText(errors.isEmpty() ? "Select a profile to preview its video maps."
                                             : QString("Skipped %1 invalid file(s):\n").arg(errors.size()) + errors.join("\n"));
         status->setText(entries.isEmpty() ? "No named profiles found." : "Select a profile to continue.");
     });
     QObject::connect(profiles, &QLineEdit::textChanged, &window, [&] {
-        profileList->clear(); table->setRowCount(0);
+        profileList->clear(); sectorList->clear(); table->setRowCount(0);
         profileCount->setText("Scan the directory to find saved profiles.");
         generate->setEnabled(false);
         status->setText("Scan the selected Profiles directory.");
+    });
+    QObject::connect(sectorDirectory, &QLineEdit::textChanged, &window, [&] {
+        sectorList->clear();
     });
     QObject::connect(profileList, &QListWidget::currentItemChanged, &window, [&](QListWidgetItem *current) {
         generate->setEnabled(current != nullptr);
@@ -727,7 +760,9 @@ int main(int argc, char **argv) {
     QObject::connect(generate, &QPushButton::clicked, &window, [&] {
         try {
             const auto p = preview();
-            const auto result = convert(p, output->text(), sector->text());
+            const QString baseSector = sectorList->currentItem()
+                ? sectorList->currentItem()->data(Qt::UserRole).toString() : QString();
+            const auto result = convert(p, output->text(), baseSector);
             const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
             status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));
             log->setPlainText("Package: " + path + (result.warnings.isEmpty() ? "" : "\n" + result.warnings.join("\n")));
