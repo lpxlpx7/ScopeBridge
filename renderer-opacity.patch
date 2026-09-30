@@ -1,0 +1,12 @@
+--- a/plugin/src/pixel_composite.h
++++ b/plugin/src/pixel_composite.h
+@@
+     uint32_t result = 0xFF000000u;
+     for (unsigned shift = 0; shift <= 16; shift += 8) {
+-        unsigned channel = ((source >> shift) & 255) +
++        unsigned sourceChannel = (source >> shift) & 255;
++        // Normalize straight-alpha input as well as premultiplied input.
++        if (sourceChannel > alpha)
++            sourceChannel = (sourceChannel * alpha + 127) / 255;
++        unsigned channel = sourceChannel +
+                            (((background >> shift) & 255) * inverse + 127) / 255;

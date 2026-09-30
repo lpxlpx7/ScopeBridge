@@ -10,8 +10,8 @@ ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable 
 
 1. Unzip the whole `ScopeBridge-Windows-x64.zip` archive and launch `ScopeBridge.exe` (keep `assets/`, the Qt DLLs and `platforms/` beside the executable).
 2. Choose the CRC **Profiles directory** (usually `%LOCALAPPDATA%/CRC/Profiles`) and the `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
-3. Click **Scan profiles**. The scrollable list displays each valid JSON profile's `Name`, sorted alphabetically. Select one profile to preview its video maps and initial ON/OFF states.
-4. Optionally choose a **Base sector** `.sct` to preserve navigation, airports, runways and other non-GEO sections. If omitted, the sector only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
+3. Click **Scan profiles**. The scrollable list displays each valid JSON profile's `Name`, sorted alphabetically. Select one profile to preview its video maps and initial ON/OFF states. Choose a sector directory in the first card; the left panel also contains a scrollable `.sct` list, and the selected file is used as the base sector.
+4. A selected **Base sector** preserves navigation, airports, runways and other non-GEO sections. If no sector is selected, the output only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
 5. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope. The selected list item determines which profile is converted; only one profile is generated per click.
 
 **CRC:1 tab selection:** ScopeBridge exports the first visible CRC display window saved in the profile (the `CRC:1` page). Within that window, it uses the tab identified by `SelectedDisplayId`; if no saved tab matches, it falls back to the first usable tab. Other CRC windows and tabs are not combined into the export. To export a different tab, select and save it in the CRC profile before generating again.
@@ -26,6 +26,8 @@ The output folder contains:
 - `Plugins/JurinasRenderer/{JurinasRenderer.dll,ground.json,style.json}` and `Plugins/TopSky/`.
 
 The renderer displays each available video map in its layer panel with a readable English name. The profile's selected STARS maps or enabled ERAM filters start visible; all other available maps start hidden and can be enabled from the panel. If a saved STARS number no longer resolves, all available maps start hidden rather than being activated automatically. GeoJSON line and polygon geometry (including filled polygons) is converted from longitude/latitude into the renderer's latitude/longitude format. The bundled renderer is built from the sibling `plugin/src/CANGroundRender.cpp` with world-layer polygon drawing enabled. `style.json` uses the source feature colors when provided and the ZME example's video color for uncolored features. CRC-only symbols and text cannot be recreated from these features. The TopSky visual theme comes from the ZME example; its Japan-specific airspace file is replaced with an empty placeholder so RJxx rules are not applied to another ARTCC. The symbology preset is likewise the ZME example's palette, not a CRC-specific export.
+
+The renderer's pixel compositing path preserves the real radar background while changing layer opacity; the standalone opacity fix is provided in [`renderer-opacity.patch`](renderer-opacity.patch).
 
 ## ARTCC compatibility
 
