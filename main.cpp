@@ -27,11 +27,15 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMap>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QtNetwork/QNetworkReply>
+#include <QtNetwork/QNetworkRequest>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QTimer>
 #include <QTableWidget>
 #include <QTextStream>
 #include <QUrl>
@@ -390,8 +394,13 @@ XPlaneNav importXPlane(const QString &root, const XPlaneOptions &options) {
         const int type = f[0].toInt(); const double lat=f[1].toDouble(), lon=f[2].toDouble();
         const QString id=f[7]; if (id.isEmpty() || !inNavArea(lat, lon, options)) continue;
         out.regionalIds.insert(id);
+        // X-Plane types 4-9 and 14-16 are ILS/LOC/GS/marker/GLS
+        // procedures, not standalone VOR/NDB facilities. Never export them
+        // into EuroScope's VOR/NDB sections.
         if (type == 3 || type == 12) { out.vors += id + " " + QString::number(f[4].toDouble()/100.0,'f',2) + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.vorCount; }
         else if (type == 2 || type == 13) { out.ndbs += id + " " + f[4] + " " + dms(lat,true) + " " + dms(lon,false) + "\n"; ++out.ndbCount; }
+        else if (type >= 4 && type <= 9) continue;
+        else if (type >= 14 && type <= 16) continue;
     }
     if (options.airways) for (const auto &line : dataLines(dir.filePath("earth_awy.dat"))) {
         const auto f=line.trimmed().split(QRegularExpression("\\s+"),Qt::SkipEmptyParts);
@@ -886,6 +895,31 @@ int main(int argc, char **argv) {
             QMessageBox::information(&window, "Package generated", "EuroScope files were created in:\n" + path);
             QDesktopServices::openUrl(QUrl::fromLocalFile(path));
         } catch (const QString &e) { QMessageBox::critical(&window, "Conversion failed", e); log->setPlainText(e); }
+    });
+    auto *updates = new QNetworkAccessManager(&window);
+    QTimer::singleShot(1800, &window, [updates, &window] {
+        QNetworkRequest request(QUrl("https://api.github.com/repos/lpxlpx7/ScopeBridge/releases/latest"));
+        request.setHeader(QNetworkRequest::UserAgentHeader, "ScopeBridge/" SCOPEBRIDGE_VERSION);
+        auto *reply = updates->get(request);
+        QObject::connect(reply, &QNetworkReply::finished, &window, [reply, &window] {
+            const QByteArray payload = reply->readAll();
+            const auto doc = QJsonDocument::fromJson(payload);
+            const QString latest = doc.object().value("tag_name").toString().remove('v');
+            const QString url = doc.object().value("html_url").toString();
+            reply->deleteLater();
+            if (latest.isEmpty() || url.isEmpty()) return;
+            const auto currentParts = QString(SCOPEBRIDGE_VERSION).split('.');
+            const auto latestParts = latest.split('.');
+            bool newer = false;
+            for (int i = 0; i < qMax(currentParts.size(), latestParts.size()); ++i) {
+                const int current = i < currentParts.size() ? currentParts.at(i).toInt() : 0;
+                const int available = i < latestParts.size() ? latestParts.at(i).toInt() : 0;
+                if (available != current) { newer = available > current; break; }
+            }
+            if (newer && QMessageBox::question(&window, "Update available",
+                    "ScopeBridge " + latest + " is available. Open the GitHub release page?") == QMessageBox::Yes)
+                QDesktopServices::openUrl(QUrl(url));
+        });
     });
     window.show();
     return app.exec();
