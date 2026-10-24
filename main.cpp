@@ -35,6 +35,9 @@
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QStringDecoder>
+#include <QTabBar>
 #include <QTimer>
 #include <QTableWidget>
 #include <QTextStream>
@@ -655,6 +658,435 @@ Result convert(const Profile &p, const QString &dest, const QString &sector, con
           "ASRFastKeys\t1\t\\" + stem + ".asr\nRecentFiles\tRecent1\t\\" + stem + ".asr\n");
     return result;
 }
+
+// ---- EuroScope (.sct/.ese) to VRC (.sct2) ----
+// VRC reads the classic SCT2 layout. EuroScope extends it with named GEO
+// lines, REGIONNAME headers, inline numeric colors, fix-name coordinates in
+// any section, UTF-8 text and the separate .ese file; all of those are
+// normalized here so VRC can load the result.
+struct VrcOptions { bool freetext = true, sectorLines = true, positions = true; };
+struct VrcResult { QString sector, pof; QStringList summary, warnings; };
+const QStringList vrcSections = {"INFO", "VOR", "NDB", "AIRPORT", "RUNWAY", "FIXES", "ARTCC", "ARTCC HIGH", "ARTCC LOW",
+                                 "SID", "STAR", "LOW AIRWAY", "HIGH AIRWAY", "GEO", "REGIONS", "LABELS"};
+QString readSectorText(const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) throw QString("Cannot read %1: %2").arg(path, f.errorString());
+    const QByteArray bytes = f.readAll();
+    if (bytes.startsWith("\xEF\xBB\xBF")) return QString::fromUtf8(bytes.mid(3));
+    QStringDecoder utf8(QStringDecoder::Utf8);
+    const QString text = utf8.decode(bytes);
+    // Only ASCII survives into the VRC file, so a legacy code page does not
+    // need to be identified; Latin-1 keeps every byte at a single character.
+    return utf8.hasError() ? QString::fromLatin1(bytes) : text;
+}
+// VRC reads sector files as ANSI. Non-ASCII text is replaced in data and
+// dropped from comments.
+QString vrcAscii(const QString &text, bool replace) {
+    QString out; out.reserve(text.size());
+    for (const QChar c : text) {
+        if (c == '\t') out += ' ';
+        else if (c.unicode() >= 32 && c.unicode() < 127) out += c;
+        else if (replace) out += '?';
+    }
+    return out;
+}
+const QRegularExpression &dmsPattern() {
+    static const QRegularExpression re("^([NSEW])(\\d{1,3})\\.(\\d{1,2})\\.(\\d{1,2}(?:\\.\\d*)?)$",
+                                       QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+bool isDms(const QString &token) { return dmsPattern().match(token).hasMatch(); }
+bool parseDms(const QString &token, bool latitude, double &value) {
+    const auto m = dmsPattern().match(token);
+    if (!m.hasMatch()) return false;
+    const QChar hemisphere = m.captured(1).at(0).toUpper();
+    if (latitude != (hemisphere == 'N' || hemisphere == 'S')) return false;
+    QString seconds = m.captured(4); if (seconds.endsWith('.')) seconds.chop(1);
+    double v = m.captured(2).toInt() + m.captured(3).toInt() / 60.0 + seconds.toDouble() / 3600.0;
+    if (hemisphere == 'S' || hemisphere == 'W') v = -v;
+    if (std::abs(v) > (latitude ? 90 : 180)) return false;
+    value = v;
+    return true;
+}
+QPair<QString, QString> splitComment(const QString &line) {
+    bool quoted = false;
+    for (int i = 0; i < line.size(); ++i) {
+        if (line.at(i) == '"') quoted = !quoted;
+        else if (line.at(i) == ';' && !quoted) return {line.left(i), line.mid(i + 1)};
+    }
+    return {line, {}};
+}
+QStringList tokens(const QString &text) {
+    static const QRegularExpression space("\\s+");
+    return text.split(space, Qt::SkipEmptyParts);
+}
+struct EsToVrc {
+    struct NavPoint { double lat = 0, lon = 0; };
+    struct Segment { QString name, color; QStringList raw; NavPoint a, b; };
+    QStringList header, defineOrder, unknownSections, warnings, positions;
+    QHash<QString, QString> defineName, defineValue;    // keyed by lower-case color name
+    QHash<QString, QStringList> input, output;
+    QHash<QString, NavPoint> nav;                       // VOR/NDB/AIRPORT/FIXES by upper-case name
+    QSet<QString> missingNames, undefinedColors;
+    int dropped = 0;
+    bool truncatedNames = false;
+
+    static QString text(const NavPoint &p) { return dms(p.lat, true) + " " + dms(p.lon, false); }
+    static const QHash<QString, QString> &standardColors() {
+        static const QHash<QString, QString> colors = {
+            {"aqua", "16776960"}, {"black", "0"}, {"blue", "16711680"}, {"fuchsia", "16711935"},
+            {"gray", "8421504"}, {"green", "32768"}, {"lime", "65280"}, {"maroon", "128"},
+            {"navy", "8388608"}, {"olive", "32896"}, {"purple", "8388736"}, {"red", "255"},
+            {"silver", "12632256"}, {"teal", "8421376"}, {"white", "16777215"}, {"yellow", "65535"}};
+        return colors;
+    }
+    static bool numeric(const QString &t) { static const QRegularExpression re("^\\d+$"); return re.match(t).hasMatch(); }
+    void addDefine(const QString &name, const QString &value) {
+        const QString key = name.toLower();
+        if (!defineName.contains(key)) defineOrder << key;
+        defineName.insert(key, name); defineValue.insert(key, value);
+    }
+    bool isColor(const QString &t) const {
+        const QString key = t.toLower();
+        return defineName.contains(key) || numeric(t) || standardColors().contains(key);
+    }
+    // Returns a #define name VRC understands, creating one when EuroScope
+    // used a raw number or an undefined name.
+    QString color(const QString &token) {
+        const QString key = token.toLower();
+        if (defineName.contains(key)) return defineName.value(key);
+        if (numeric(token)) { addDefine("COLOR-" + token, token); return "COLOR-" + token; }
+        if (standardColors().contains(key)) { addDefine(token.toUpper(), standardColors().value(key)); return token.toUpper(); }
+        undefinedColors.insert(token);
+        const QString name = vrcAscii(token, true);
+        addDefine(name, "16777215");
+        return name;
+    }
+    bool resolve(const QString &latToken, const QString &lonToken, NavPoint &p) const {
+        const bool latDms = isDms(latToken), lonDms = isDms(lonToken);
+        if (latDms != lonDms) return false;
+        if (latDms) return parseDms(latToken, true, p.lat) && parseDms(lonToken, false, p.lon);
+        // EuroScope repeats a fix/navaid/airport name in both coordinate slots.
+        if (latToken.compare(lonToken, Qt::CaseInsensitive) != 0) return false;
+        const auto it = nav.constFind(latToken.toUpper());
+        if (it == nav.cend()) return false;
+        p = *it;
+        return true;
+    }
+    void noteMissing(const QStringList &t) {
+        for (const auto &token : t.mid(qMax(0, t.size() - 5)))
+            if (!isDms(token) && !nav.contains(token.toUpper()) && !isColor(token)) missingNames.insert(token);
+    }
+    // name? lat lon lat lon color? -- the name may contain spaces.
+    bool segment(const QStringList &t, Segment &s) const {
+        const bool colorFirst = t.size() >= 5 && !isDms(t.last()) && (isColor(t.last()) || !nav.contains(t.last().toUpper()));
+        for (const int strip : colorFirst ? QList<int>{1, 0} : QList<int>{0, 1}) {
+            if (strip && (t.size() < 5 || isDms(t.last()))) continue;
+            const int n = t.size() - strip;
+            if (n < 4) continue;
+            NavPoint a, b;
+            if (!resolve(t[n - 4], t[n - 3], a) || !resolve(t[n - 2], t[n - 1], b)) continue;
+            s.name = t.mid(0, n - 4).join(' ');
+            s.color = strip ? t.last() : QString();
+            s.raw = t.mid(n - 4, 4); s.a = a; s.b = b;
+            return true;
+        }
+        return false;
+    }
+    void comment(const QString &section, const QString &note) {
+        const QString clean = vrcAscii(note, false).trimmed();
+        if (!clean.isEmpty()) output[section] << "; " + clean;
+    }
+    static QString trailing(const QString &note) {
+        const QString clean = vrcAscii(note, false).trimmed();
+        return clean.isEmpty() ? QString() : " ;" + clean;
+    }
+
+    void load(const QString &source) {
+        static const QRegularExpression define("^#define\\s+(\\S+)\\s+(\\S+)", QRegularExpression::CaseInsensitiveOption);
+        QString section;
+        bool started = false;
+        for (QString line : source.split('\n')) {
+            line.remove('\r');
+            const QString clean = line.trimmed();
+            if (clean.startsWith("#define", Qt::CaseInsensitive)) {
+                const auto m = define.match(clean);
+                const QString value = m.captured(2).section(';', 0, 0);
+                if (m.hasMatch() && numeric(value)) addDefine(vrcAscii(m.captured(1), true), value);
+                else warnings << "Ignored malformed color definition: " + vrcAscii(clean, true);
+                continue;
+            }
+            if (clean.startsWith('[') && clean.indexOf(']') > 1) {
+                QString name = clean.mid(1, clean.indexOf(']') - 1).trimmed().toUpper();
+                name.replace(QRegularExpression("\\s+"), " ");
+                section = vrcSections.contains(name) ? name : QString();
+                if (section.isEmpty() && name != "DEFINE") unknownSections << name;
+                started = true;
+                continue;
+            }
+            if (!started) { if (clean.startsWith(';')) header << line; continue; }
+            if (!section.isEmpty()) input[section] << line;
+        }
+        if (!input.contains("INFO")) warnings << "The source has no [INFO] section; default values were written.";
+        for (const QPair<QString, int> &source : QList<QPair<QString, int>>{{"VOR", 2}, {"NDB", 2}, {"AIRPORT", 2}, {"FIXES", 1}}) {
+            for (const auto &line : input.value(source.first)) {
+                const QStringList t = tokens(splitComment(line).first);
+                const int i = source.second;
+                NavPoint p;
+                if (t.size() >= i + 2 && parseDms(t[i], true, p.lat) && parseDms(t[i + 1], false, p.lon)
+                    && !nav.contains(t[0].toUpper()))
+                    nav.insert(t[0].toUpper(), p);
+            }
+        }
+    }
+    void convertInfo() {
+        QStringList values;
+        for (const auto &line : input.value("INFO")) {
+            const QString content = splitComment(line).first.trimmed();
+            if (!content.isEmpty()) values << content;
+        }
+        const QStringList defaults = {"ScopeBridge VRC sector", "OBS", "ZZZZ", "N000.00.00.000", "E000.00.00.000", "60", "60", "0", "1"};
+        if (!values.isEmpty() && values.size() < 9) warnings << QString("[INFO] has %1 of 9 lines; missing lines use defaults.").arg(values.size());
+        for (int i = 0; i < defaults.size(); ++i) {
+            QString value = i < values.size() ? values.at(i) : defaults.at(i);
+            if (i == 3 || i == 4) {
+                NavPoint p; double v = 0;
+                if (parseDms(value, i == 3, v)) value = dms(v, i == 3);
+                else if (resolve(value, value, p)) value = dms(i == 3 ? p.lat : p.lon, i == 3);
+            }
+            output["INFO"] << vrcAscii(value, true);
+        }
+    }
+    void convertNavigation(const QString &section) {
+        const int index = section == "FIXES" ? 1 : section == "RUNWAY" ? 4 : 2;
+        for (const auto &line : input.value(section)) {
+            const auto [content, note] = splitComment(line);
+            const QStringList t = tokens(content);
+            if (t.isEmpty()) { comment(section, note); continue; }
+            NavPoint p, q;
+            const bool runway = section == "RUNWAY";
+            if (t.size() < index + (runway ? 4 : 2) || !resolve(t[index], t[index + 1], p)
+                || (runway && !resolve(t[index + 2], t[index + 3], q))) {
+                noteMissing(t); ++dropped; continue;
+            }
+            QStringList fields = t.mid(0, index);
+            if (runway) { fields[0] = fields[0].leftJustified(3); fields[1] = fields[1].leftJustified(3); }
+            fields << text(p);
+            if (runway) fields << text(q);
+            fields << t.mid(index + (runway ? 4 : 2));
+            if (section == "AIRPORT" && t.size() < 5) fields << "D";   // VRC expects an airspace class
+            output[section] << vrcAscii(fields.join(' '), true) + trailing(note);
+        }
+    }
+    void convertLines(const QString &section) {
+        const bool geo = section == "GEO", artcc = section.startsWith("ARTCC");
+        QString current;
+        for (const auto &line : input.value(section)) {
+            const auto [content, note] = splitComment(line);
+            const QStringList t = tokens(content);
+            if (t.isEmpty()) { comment(section, note); continue; }
+            Segment s;
+            if (!segment(t, s)) { noteMissing(t); ++dropped; continue; }
+            if (geo) {
+                // VRC GEO lines carry no name; keep EuroScope's name as a group comment.
+                if (!s.name.isEmpty() && s.name != current) { current = s.name; comment(section, current); }
+                output[section] << text(s.a) + " " + text(s.b) + (s.color.isEmpty() ? QString() : " " + color(s.color)) + trailing(note);
+                continue;
+            }
+            if (!s.name.isEmpty()) current = vrcAscii(s.name, true).replace(' ', '_');
+            const QString name = current.isEmpty() ? (artcc ? "ARTCC" : "AIRWAY") : current;
+            // VRC colors boundaries and airways itself; EuroScope colors are dropped.
+            output[section] << name.leftJustified(13) + " " + text(s.a) + " " + text(s.b) + trailing(note);
+        }
+    }
+    void convertDiagrams(const QString &section) {
+        QString current;
+        bool pending = false;
+        for (const auto &line : input.value(section)) {
+            const auto [content, note] = splitComment(line);
+            const QStringList t = tokens(content);
+            if (t.isEmpty()) { comment(section, note); continue; }
+            Segment s;
+            if (!segment(t, s)) {
+                // EuroScope allows a diagram name on a line of its own.
+                if (!content.at(0).isSpace() && t.size() < 4 && std::none_of(t.cbegin(), t.cend(), isDms)) {
+                    current = vrcAscii(t.join(' '), true); pending = true;
+                } else { noteMissing(t); ++dropped; }
+                continue;
+            }
+            if (!s.name.isEmpty()) { current = vrcAscii(s.name, true); pending = true; }
+            QString prefix(26, ' ');
+            if (pending) {
+                // VRC reads the diagram name from the first 26 columns.
+                QString name = current.isEmpty() ? QString("UNNAMED") : current;
+                if (name.size() > 25) { name.truncate(25); truncatedNames = true; }
+                prefix = name.leftJustified(26);
+                pending = false;
+            }
+            QStringList points;
+            for (const int i : {0, 2}) {
+                const NavPoint &p = i == 0 ? s.a : s.b;
+                if (isDms(s.raw[i])) points << dms(p.lat, true).leftJustified(14) + " " + dms(p.lon, false).leftJustified(14);
+                else points << s.raw[i].toUpper().leftJustified(14) + " " + s.raw[i + 1].toUpper().leftJustified(14);
+            }
+            QString out = prefix + points.join(' ');
+            while (out.endsWith(' ')) out.chop(1);
+            if (!s.color.isEmpty()) out += " " + color(s.color);
+            output[section] << out + trailing(note);
+        }
+    }
+    void convertRegions() {
+        QString pendingColor;
+        for (const auto &line : input.value("REGIONS")) {
+            const auto [content, note] = splitComment(line);
+            const QStringList t = tokens(content);
+            if (t.isEmpty()) { comment("REGIONS", note); continue; }
+            if (t.first().compare("REGIONNAME", Qt::CaseInsensitive) == 0) { comment("REGIONS", t.mid(1).join(' ')); continue; }
+            NavPoint p;
+            if (t.size() >= 3) {
+                pendingColor = color(t[0]);
+                if (!resolve(t[1], t[2], p)) { noteMissing(t); ++dropped; continue; }
+            } else if (t.size() != 2 || !resolve(t[0], t[1], p)) { noteMissing(t); ++dropped; continue; }
+            if (!pendingColor.isEmpty()) { output["REGIONS"] << pendingColor.leftJustified(9) + " " + text(p); pendingColor.clear(); }
+            else output["REGIONS"] << QString(10, ' ') + text(p);
+        }
+    }
+    void convertLabels() {
+        static const QRegularExpression label("^\\s*\"([^\"]*)\"\\s*(.*)$");
+        for (const auto &line : input.value("LABELS")) {
+            const auto [content, note] = splitComment(line);
+            if (content.trimmed().isEmpty()) { comment("LABELS", note); continue; }
+            const auto m = label.match(content);
+            const QStringList t = tokens(m.captured(2));
+            NavPoint p;
+            if (!m.hasMatch() || t.size() < 2 || !resolve(t[0], t[1], p)) { noteMissing(t); ++dropped; continue; }
+            output["LABELS"] << QString("\"%1\" %2 %3").arg(vrcAscii(m.captured(1), true), text(p), color(t.size() >= 3 ? t[2] : "WHITE"))
+                                + trailing(note);
+        }
+    }
+    void convert() {
+        convertInfo();
+        for (const QString &section : {"VOR", "NDB", "AIRPORT", "RUNWAY", "FIXES"}) convertNavigation(section);
+        for (const QString &section : {"ARTCC", "ARTCC HIGH", "ARTCC LOW", "LOW AIRWAY", "HIGH AIRWAY", "GEO"}) convertLines(section);
+        convertDiagrams("SID"); convertDiagrams("STAR");
+        convertRegions(); convertLabels();
+    }
+    // .ese: FREETEXT becomes LABELS, SECTORLINE/CIRCLE_SECTORLINE become
+    // ARTCC LOW boundaries and POSITIONS is written as a VRC .pof file.
+    void loadExtension(const QString &source, const VrcOptions &options) {
+        QString section, lineId, group;
+        QList<NavPoint> line;
+        auto flush = [&] {
+            const QString name = "ESE_" + vrcAscii(lineId, true).replace(' ', '_');
+            for (int i = 1; i < line.size(); ++i)
+                output["ARTCC LOW"] << name.leftJustified(13) + " " + text(line.at(i - 1)) + " " + text(line.at(i));
+            line.clear();
+        };
+        for (QString raw : source.split('\n')) {
+            raw.remove('\r');
+            const QString clean = raw.trimmed();
+            if (clean.startsWith('[') && clean.indexOf(']') > 1) {
+                flush(); lineId.clear();
+                section = clean.mid(1, clean.indexOf(']') - 1).trimmed().toUpper();
+                continue;
+            }
+            if (clean.isEmpty() || clean.startsWith(';')) continue;
+            const QStringList parts = clean.split(':');
+            NavPoint p;
+            if (section == "FREETEXT" && options.freetext) {
+                if (parts.size() < 4 || !resolve(parts[0].trimmed(), parts[1].trimmed(), p)) { ++dropped; continue; }
+                if (parts[2] != group) { group = parts[2]; comment("LABELS", "FREETEXT " + group); }
+                if (!defineName.contains("freetext-c")) addDefine("FREETEXT-C", "12632256");
+                const QString textValue = vrcAscii(parts.mid(3).join(':'), true).remove('"');
+                output["LABELS"] << QString("\"%1\" %2 FREETEXT-C").arg(textValue, text(p));
+            } else if (section == "POSITIONS" && options.positions) {
+                positions << vrcAscii(clean, true);
+            } else if (section == "AIRSPACE" && options.sectorLines) {
+                const QString key = parts[0].trimmed().toUpper();
+                if (key == "SECTORLINE") { flush(); lineId = parts.value(1).trimmed(); }
+                else if (key == "COORD" && !lineId.isEmpty()) {
+                    if (resolve(parts.value(1).trimmed(), parts.value(2).trimmed(), p)) line << p; else ++dropped;
+                } else if (key == "CIRCLE_SECTORLINE") {
+                    flush(); lineId = parts.value(1).trimmed();
+                    NavPoint c; bool ok = false; double radius = 0;
+                    if (parts.size() >= 5 && resolve(parts[2].trimmed(), parts[3].trimmed(), c)) radius = parts[4].toDouble(&ok);
+                    else if (parts.size() >= 4 && resolve(parts[2].trimmed(), parts[2].trimmed(), c)) radius = parts[3].toDouble(&ok);
+                    if (ok && radius > 0) {
+                        const double scale = std::max(0.01, std::cos(c.lat * 3.141592653589793 / 180.0));
+                        for (int k = 0; k <= 72; ++k) {
+                            const double angle = k * 2 * 3.141592653589793 / 72;
+                            line << NavPoint{c.lat + radius / 60.0 * std::cos(angle), c.lon + radius / 60.0 * std::sin(angle) / scale};
+                        }
+                    } else ++dropped;
+                    flush(); lineId.clear();
+                } else if (key == "SECTOR") { flush(); lineId.clear(); }
+            }
+        }
+        flush();
+    }
+    QString render(const QString &sourceName) const {
+        QStringList out{"; VRC sector converted from EuroScope by ScopeBridge " SCOPEBRIDGE_VERSION,
+                        "; Source: " + vrcAscii(sourceName, true)};
+        for (const auto &line : header) {
+            const QString clean = vrcAscii(line, false).trimmed();
+            if (clean.size() > 1) out << clean;
+        }
+        out << "";
+        for (const auto &key : defineOrder) out << "#define " + defineName.value(key) + " " + defineValue.value(key);
+        out << "";
+        for (const auto &section : vrcSections) out << "[" + section + "]" << output.value(section) << "";
+        return out.join("\r\n");
+    }
+};
+VrcResult esToVrc(const QString &sectorPath, const QString &extensionPath, const QString &destination, const VrcOptions &options = {}) {
+    if (sectorPath.trimmed().isEmpty()) throw QString("Choose a EuroScope .sct file first.");
+    if (!QFileInfo(sectorPath).isFile()) throw QString("EuroScope sector was not found: %1").arg(sectorPath);
+    if (!extensionPath.trimmed().isEmpty() && !QFileInfo(extensionPath).isFile())
+        throw QString("EuroScope extension (.ese) was not found: %1").arg(extensionPath);
+    if (destination.trimmed().isEmpty()) throw QString("Choose an output folder for the VRC sector.");
+    EsToVrc converter;
+    converter.load(readSectorText(sectorPath));
+    converter.convert();
+    if (!extensionPath.trimmed().isEmpty()) converter.loadExtension(readSectorText(extensionPath), options);
+    if (!QDir().mkpath(destination)) throw QString("Cannot create %1").arg(destination);
+    VrcResult result;
+    const QString stem = safe(QFileInfo(sectorPath).completeBaseName());
+    result.sector = QDir(destination).absoluteFilePath(stem + ".sct2");
+    for (const QString &input : {sectorPath, extensionPath})
+        if (!input.isEmpty() && QFileInfo(input).absoluteFilePath().compare(result.sector, Qt::CaseInsensitive) == 0)
+            throw QString("The output would overwrite the source file. Choose a different output folder.");
+    write(result.sector, converter.render(QFileInfo(sectorPath).fileName()));
+    if (!converter.positions.isEmpty()) {
+        result.pof = QDir(destination).absoluteFilePath(stem + ".pof");
+        write(result.pof, "; VRC positions converted from " + vrcAscii(QFileInfo(extensionPath).fileName(), true)
+                              + " by ScopeBridge\r\n" + converter.positions.join("\r\n") + "\r\n");
+    }
+    for (const auto &section : vrcSections) {
+        const auto lines = converter.output.value(section);
+        const int count = std::count_if(lines.cbegin(), lines.cend(), [](const QString &l) { return !l.startsWith(';'); });
+        if (count && section != "INFO") result.summary << QString("[%1] %2").arg(section).arg(count);
+    }
+    if (!converter.positions.isEmpty()) result.summary << QString("POF positions %1").arg(converter.positions.size());
+    result.warnings = converter.warnings;
+    if (converter.dropped) result.warnings << QString("%1 line(s) could not be converted and were skipped.").arg(converter.dropped);
+    if (!converter.missingNames.isEmpty()) {
+        QStringList names(converter.missingNames.cbegin(), converter.missingNames.cend());
+        names.sort();
+        result.warnings << "Unresolved fix/navaid names: " + vrcAscii(names.mid(0, 15).join(", "), true)
+                               + (names.size() > 15 ? QString(" (+%1 more)").arg(names.size() - 15) : QString());
+    }
+    if (!converter.undefinedColors.isEmpty()) {
+        QStringList names(converter.undefinedColors.cbegin(), converter.undefinedColors.cend());
+        names.sort();
+        result.warnings << "Undefined colors were defined as white: " + vrcAscii(names.join(", "), true);
+    }
+    if (converter.truncatedNames) result.warnings << "Some SID/STAR names were longer than 25 characters and were truncated for VRC.";
+    if (!converter.unknownSections.isEmpty()) {
+        converter.unknownSections.removeDuplicates();
+        result.warnings << "Sections not supported by VRC were skipped: " + vrcAscii(converter.unknownSections.join(", "), true);
+    }
+    return result;
+}
 }
 
 int main(int argc, char **argv) {
@@ -667,6 +1099,26 @@ int main(int argc, char **argv) {
             for (const auto &error : errors) QTextStream(stderr) << error << "\n";
             return 0;
         } catch (const QString &e) { QTextStream(stderr) << e << "\n"; return 1; }
+    }
+    if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == "--es-to-vrc") {
+        QCoreApplication cli(argc, argv);
+        try {
+            const QString sector = QString::fromLocal8Bit(argv[2]);
+            QString extension = argc >= 5 ? QString::fromLocal8Bit(argv[4]) : QString();
+            if (extension.isEmpty()) {
+                const QFileInfo info(sector);
+                const QString sibling = info.dir().filePath(info.completeBaseName() + ".ese");
+                if (QFileInfo::exists(sibling)) extension = sibling;
+            }
+            const auto result = esToVrc(sector, extension, QString::fromLocal8Bit(argv[3]));
+            QTextStream(stdout) << result.sector << "\n" << (result.pof.isEmpty() ? QString() : result.pof + "\n")
+                                << result.summary.join(", ") << "\n";
+            for (const auto &warning : result.warnings) QTextStream(stdout) << "Warning: " << warning << "\n";
+            return 0;
+        } catch (const QString &error) {
+            QTextStream(stderr) << error << "\n";
+            return 1;
+        }
     }
     if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == "--convert") {
         QCoreApplication cli(argc, argv);
@@ -708,23 +1160,33 @@ int main(int argc, char **argv) {
     window.setWindowTitle("ScopeBridge " SCOPEBRIDGE_VERSION);
     window.setMinimumSize(980, 760);
     window.resize(1240, 900);
-    auto *layout = new QVBoxLayout(&window); layout->setContentsMargins(28, 24, 28, 22); layout->setSpacing(16);
-    auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); layout->addWidget(eyebrow);
+    auto *root = new QVBoxLayout(&window); root->setContentsMargins(28, 24, 28, 22); root->setSpacing(16);
+    auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); root->addWidget(eyebrow);
     auto *heading = new QHBoxLayout;
     auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); heading->addWidget(title);
     heading->addStretch();
     auto *version = new QLabel("VERSION " SCOPEBRIDGE_VERSION); version->setObjectName("version"); heading->addWidget(version);
-    layout->addLayout(heading);
-    auto *hint = new QLabel("Build a renderer-ready EuroScope package from a saved CRC display."); hint->setObjectName("hint"); layout->addWidget(hint);
+    root->addLayout(heading);
+    auto *hint = new QLabel("Build a renderer-ready EuroScope package from a saved CRC display."); hint->setObjectName("hint"); root->addWidget(hint);
+    auto *mode = new QTabBar;
+    mode->addTab("CRC  →  EuroScope");
+    mode->addTab("EuroScope  →  VRC");
+    mode->setExpanding(false);
+    mode->setDrawBase(false);
+    root->addWidget(mode);
+    auto *pages = new QStackedWidget; root->addWidget(pages, 1);
+    auto *crcPage = new QWidget; pages->addWidget(crcPage);
+    auto *layout = new QVBoxLayout(crcPage); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(16);
     const QString local = qEnvironmentVariable("LOCALAPPDATA");
     auto *sources = new QFrame; sources->setObjectName("card");
     auto *sourceLayout = new QVBoxLayout(sources); sourceLayout->setContentsMargins(20, 16, 20, 18); sourceLayout->setSpacing(10);
     auto *sourceTitle = new QLabel("01  /  Source & destination"); sourceLayout->addWidget(sourceTitle);
     auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignLeft); form->setSpacing(12); sourceLayout->addLayout(form);
-    auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString()) {
+    auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString(),
+                     QFormLayout *target = nullptr) {
         auto *edit = new QLineEdit(initial); auto *row = new QWidget; auto *h = new QHBoxLayout(row);
         h->setContentsMargins(0, 0, 0, 0); h->addWidget(edit);
-        auto *browse = new QPushButton("Browse"); h->addWidget(browse); form->addRow(caption, row);
+        auto *browse = new QPushButton("Browse"); h->addWidget(browse); (target ? target : form)->addRow(caption, row);
         QObject::connect(browse, &QPushButton::clicked, &window, [=, &window] {
             QString path = directory ? QFileDialog::getExistingDirectory(&window, caption, edit->text())
                 : QFileDialog::getOpenFileName(&window, caption, edit->text(), filter);
@@ -801,7 +1263,64 @@ int main(int argc, char **argv) {
     generate->setDefault(true);
     actions->addWidget(status, 1); actions->addWidget(generate); layout->addLayout(actions);
     auto *licenseNotice = new QLabel("GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">License</a> · UI powered by Qlementine (MIT)");
-    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); layout->addWidget(licenseNotice);
+    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); root->addWidget(licenseNotice);
+    // EuroScope -> VRC page.
+    auto *vrcPage = new QWidget; pages->addWidget(vrcPage);
+    auto *vrcLayout = new QVBoxLayout(vrcPage); vrcLayout->setContentsMargins(0, 0, 0, 0); vrcLayout->setSpacing(16);
+    auto *vrcCard = new QFrame; vrcCard->setObjectName("card");
+    auto *vrcCardLayout = new QVBoxLayout(vrcCard); vrcCardLayout->setContentsMargins(20, 16, 20, 18); vrcCardLayout->setSpacing(10);
+    vrcCardLayout->addWidget(new QLabel("01  /  EuroScope sector & destination"));
+    auto *vrcForm = new QFormLayout; vrcForm->setLabelAlignment(Qt::AlignLeft); vrcForm->setSpacing(12); vrcCardLayout->addLayout(vrcForm);
+    auto *esSector = field("EuroScope sector (.sct)", QString(), false, "EuroScope sector (*.sct *.sct2);;All files (*)", vrcForm);
+    auto *esExtension = field("EuroScope extension (.ese, optional)", QString(), false, "EuroScope extension (*.ese);;All files (*)", vrcForm);
+    auto *vrcOutput = field("Save VRC sector to", QDir::homePath() + "/ScopeBridge-VRC", true, QString(), vrcForm);
+    vrcLayout->addWidget(vrcCard);
+    auto *vrcNote = new QLabel("Writes a VRC .sct2: colors become #define names, GEO names become comments, REGIONNAME lines are removed,\n"
+                               "fix/navaid names are resolved to coordinates and non-ASCII text is replaced. Source files are never changed.");
+    vrcNote->setObjectName("hint"); vrcLayout->addWidget(vrcNote);
+    auto *vrcOptionsTitle = new QLabel("02  /  .ese content"); vrcLayout->addWidget(vrcOptionsTitle);
+    auto *vrcOptionRow = new QHBoxLayout;
+    auto *useFreetext = new QCheckBox("FREETEXT → labels"); useFreetext->setChecked(true);
+    auto *useSectorLines = new QCheckBox("SECTORLINE → ARTCC LOW"); useSectorLines->setChecked(true);
+    auto *usePositions = new QCheckBox("POSITIONS → .pof"); usePositions->setChecked(true);
+    for (auto *box : {useFreetext, useSectorLines, usePositions}) vrcOptionRow->addWidget(box);
+    vrcOptionRow->addStretch(); vrcLayout->addLayout(vrcOptionRow);
+    auto *vrcLog = new QPlainTextEdit; vrcLog->setReadOnly(true);
+    vrcLog->setPlainText("Choose a EuroScope .sct file. A .ese file with the same name is picked up automatically.");
+    vrcLayout->addWidget(vrcLog, 1);
+    auto *vrcActions = new QHBoxLayout;
+    auto *vrcStatus = new QLabel("No sector selected."); vrcStatus->setObjectName("hint");
+    auto *vrcGenerate = new QPushButton("Generate VRC sector"); vrcGenerate->setObjectName("primary");
+    vrcActions->addWidget(vrcStatus, 1); vrcActions->addWidget(vrcGenerate); vrcLayout->addLayout(vrcActions);
+    QObject::connect(esSector, &QLineEdit::textChanged, &window, [=](const QString &path) {
+        const QFileInfo info(path);
+        const QString sibling = info.dir().filePath(info.completeBaseName() + ".ese");
+        if (info.isFile() && QFileInfo::exists(sibling)) esExtension->setText(QDir::toNativeSeparators(sibling));
+        vrcStatus->setText(info.isFile() ? "Ready: " + info.fileName() : "No sector selected.");
+    });
+    QObject::connect(vrcGenerate, &QPushButton::clicked, &window, [=, &window] {
+        try {
+            VrcOptions options;
+            options.freetext = useFreetext->isChecked();
+            options.sectorLines = useSectorLines->isChecked();
+            options.positions = usePositions->isChecked();
+            const auto result = esToVrc(esSector->text().trimmed(), esExtension->text().trimmed(), vrcOutput->text().trimmed(), options);
+            QStringList lines{"Sector: " + QDir::toNativeSeparators(result.sector)};
+            if (!result.pof.isEmpty()) lines << "Positions: " + QDir::toNativeSeparators(result.pof);
+            lines << "" << result.summary;
+            if (!result.warnings.isEmpty()) lines << "" << result.warnings;
+            vrcLog->setPlainText(lines.join('\n'));
+            vrcStatus->setText(QString("Generated %1").arg(QFileInfo(result.sector).fileName()));
+            QMessageBox::information(&window, "VRC sector generated", "VRC files were created in:\n" + QFileInfo(result.sector).absolutePath());
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(result.sector).absolutePath()));
+        } catch (const QString &e) { QMessageBox::critical(&window, "Conversion failed", e); vrcLog->setPlainText(e); }
+    });
+    QObject::connect(mode, &QTabBar::currentChanged, &window, [=](int index) {
+        pages->setCurrentIndex(index);
+        eyebrow->setText(index == 0 ? "CRC  /  EUROSCOPE" : "EUROSCOPE  /  VRC");
+        hint->setText(index == 0 ? "Build a renderer-ready EuroScope package from a saved CRC display."
+                                 : "Convert a EuroScope sector (.sct + .ese) into a VRC sector file (.sct2).");
+    });
     auto preview = [&]() -> Profile {
         auto *selected = profileList->currentItem();
         if (!selected) throw QString("Select a profile from the list first.");

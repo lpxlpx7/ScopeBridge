@@ -29,6 +29,20 @@ The renderer displays each available video map in its layer panel with a readabl
 
 The renderer's pixel compositing path preserves the real radar background while changing layer opacity; the standalone opacity fix is provided in [`renderer-opacity.patch`](renderer-opacity.patch). The renderer panel includes a vertical scrollbar with up/down controls for long map lists.
 
+## EuroScope → VRC
+
+Switch to the **EuroScope → VRC** tab under the title to convert an existing EuroScope sector into a VRC `.sct2`. Choose the `.sct` file (a `.ese` with the same name is picked up automatically) and an output folder, then click **Generate VRC sector**. The output follows the layout of VRC sector files such as VATJPN's `Japan2504` package:
+
+- `#define` colors are collected from anywhere in the file (including EuroScope's `[DEFINE]` block) and written at the top; numeric or standard color names used inline get their own `#define`, and undefined names are defined as white with a warning;
+- `[GEO]` element names become `;` comments, `REGIONNAME` lines become comments, and region vertices are indented;
+- fix, navaid and airport names used as coordinates are resolved, except in `[SID]`/`[STAR]` diagrams, which keep names as VRC does and use the 26-column name field;
+- `[ARTCC*]` names have spaces replaced with `_` and EuroScope colors removed, since VRC colors boundaries itself;
+- UTF-8 or legacy-code-page text is written as ASCII (`?` replaces non-ASCII characters in data; they are removed from comments).
+
+From the `.ese` (each can be turned off): `[FREETEXT]` becomes `[LABELS]` using the `FREETEXT-C` color, `SECTORLINE`/`CIRCLE_SECTORLINE` become `[ARTCC LOW]` entries named `ESE_<id>`, and `[POSITIONS]` is written as a VRC `.pof` file. Lines that cannot be resolved are skipped and reported, along with the unresolved names. Source files are never changed.
+
+Batch use: `ScopeBridge.exe --es-to-vrc <sector.sct> <output-directory> [sector.ese]`.
+
 ## ARTCC compatibility
 
 The facility is selected from the profile's `ArtccId`, not hard-coded to ZME. ScopeBridge finds the corresponding `ARTCCs/<ArtccId>.json`, resolves a STARS `SelectedVideoMapIds` entry against the display facility's `starsConfiguration.videoMapIds` (or its parent facility), maps ERAM `ActiveGeoMap` and `MapFilters` through the facility's geo-map list and feature filters, and supports tower-cab, ASDEX and SAID displays. It looks for GeoJSON files in `VideoMaps/<ArtccId>/` or in a directly selected ARTCC map folder. Tested with profiles from ZDC, ZLA, ZME, ZNY, ZOA and ZSU. If CRC has changed its facility data since a profile was saved, out-of-range map numbers are reported; unselected maps remain available in the renderer panel but start hidden.
