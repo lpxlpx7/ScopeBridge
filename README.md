@@ -2,17 +2,17 @@
 
 ScopeBridge converts a CRC profile and GeoJSON video maps into a EuroScope package using **Jurina's Renderer**. The Windows release folder contains `ScopeBridge.exe`, the Qt runtime, a precompiled 32-bit `JurinasRenderer.dll`, TopSky files, and the example EuroScope symbology preset.
 
-The desktop interface uses [Qlementine](https://github.com/oclero/qlementine) v1.4.2 (MIT license) with a bundled dark theme and requests San Francisco UI fonts, falling back to Segoe UI when San Francisco is not installed. The complete portable archive includes `QLEMENTINE-LICENSE.txt`; the Qt GUI is statically linked with Qlementine and still dynamically links to Qt.
+The desktop interface uses [Qlementine](https://github.com/oclero/qlementine) v1.4.2 (MIT license) with a bundled macOS-style dark theme. Text uses Segoe UI Variable (Windows 11), falling back to Segoe UI on Windows 10, rendered with DirectWrite. Paths, options and the window layout are remembered between sessions. The complete portable archive includes `QLEMENTINE-LICENSE.txt`; the Qt GUI is statically linked with Qlementine and still dynamically links to Qt.
 
 ScopeBridge source is licensed under [GNU GPL version 3](LICENSE). The portable archive includes the license text; bundled Qt and TopSky files retain their own licenses. The renderer source is maintained in the sibling `plugin/` workspace, with the ScopeBridge-specific changes provided as a [patch](renderer-world-polygons.patch).
 
 ## Use
 
 1. Unzip the whole `ScopeBridge-Windows-x64.zip` archive and launch `ScopeBridge.exe` (keep `assets/`, the Qt DLLs and `platforms/` beside the executable).
-2. Choose the CRC **Profiles directory** (usually `%LOCALAPPDATA%/CRC/Profiles`) and the `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
-3. Click **Scan profiles**. The scrollable list displays each valid JSON profile's `Name`, sorted alphabetically. Select one profile to preview its video maps and initial ON/OFF states. Choose a sector directory in the first card; the left panel also contains a scrollable `.sct` list, and the selected file is used as the base sector.
-4. A selected **Base sector** preserves navigation, airports, runways and other non-GEO sections. If no sector is selected, the output only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
-5. Click **Generate EuroScope sector**, then open the output `.prf` in EuroScope. The selected list item determines which profile is converted; only one profile is generated per click.
+2. Choose the **CRC profiles** folder (usually `%LOCALAPPDATA%/CRC/Profiles`) and the `VideoMaps` folder (the folder containing `ZME`, `ZOA`, etc., or an individual ARTCC map folder). CRC `ARTCCs/<id>.json` must be installed locally or alongside the selected data.
+3. Click **Scan**. The scrollable list displays each valid JSON profile's `Name`, sorted alphabetically. Select one profile to preview its video maps and initial On/Off states (Ctrl+F jumps to the profile search). Choose a **Sector files** folder in the Sources group; the left panel also contains a scrollable `.sct` list, and the selected file is used as the base sector.
+4. A selected **Base Sector** preserves navigation, airports, runways and other non-GEO sections. If no sector is selected, the output only contains basic `[INFO]`; CRC profiles/video maps alone cannot reconstruct runway/navigation records.
+5. Click **Generate Package** (or double-click the profile), then open the output `.prf` in EuroScope. The selected list item determines which profile is converted; only one profile is generated per click.
 
 **CRC:1 tab selection:** ScopeBridge exports the first visible CRC display window saved in the profile (the `CRC:1` page). Within that window, it uses the tab identified by `SelectedDisplayId`; if no saved tab matches, it falls back to the first usable tab. Other CRC windows and tabs are not combined into the export. To export a different tab, select and save it in the CRC profile before generating again.
 
@@ -31,7 +31,7 @@ The renderer's pixel compositing path preserves the real radar background while 
 
 ## EuroScope → VRC
 
-Switch to the **EuroScope → VRC** tab under the title to convert an existing EuroScope sector into a VRC `.sct2`. Choose the `.sct` file (a `.ese` with the same name is picked up automatically) and an output folder, then click **Generate VRC sector**. The output follows the layout of VRC sector files such as VATJPN's `Japan2504` package:
+Switch to **EuroScope → VRC** with the segmented control in the top-right corner to convert an existing EuroScope sector into a VRC `.sct2`. Choose the `.sct` file (a `.ese` with the same name is picked up automatically) and an output folder, then click **Convert**. The output follows the layout of VRC sector files such as VATJPN's `Japan2504` package:
 
 - `#define` colors are collected from anywhere in the file (including EuroScope's `[DEFINE]` block) and written at the top; numeric or standard color names used inline get their own `#define`, and undefined names are defined as white with a warning;
 - `[GEO]` element names become `;` comments, `REGIONNAME` lines become comments, and region vertices are indented;
@@ -51,7 +51,7 @@ Generated `.ese` positions and frequencies come from CRC facility data; position
 
 ## X-Plane Custom Data navigation
 
-The optional **X-Plane Custom Data** field has four independent checkboxes, all disabled by default to avoid generating huge sectors: **Fixes**, **VOR / NDB**, **Airways**, and **CIFP summary**. **Profile area only** is enabled by default; when selected, fixes and navaids are filtered to twice the CRC display range around the selected profile center, limited to 80–500 NM. Airways are kept when both endpoints are in that regional navigation set. Only checked categories are read and written. `earth_fix.dat`, `earth_nav.dat`, and `earth_awy.dat` are converted to regional fixes, navaids, and airway records. `CIFP/*.dat` is scanned and its procedure counts are recorded as comments; detailed SID/STAR/approach route conversion requires a dedicated EuroScope procedure mapping. The Custom Data folder is read-only and is never copied or modified. The GUI also includes a live profile search field and larger scrollable profile/sector selectors.
+The optional **X-Plane data** field (an X-Plane Custom Data folder) has four independent checkboxes, all disabled by default to avoid generating huge sectors: **Fixes**, **VOR / NDB**, **Airways**, and **CIFP summary**. **Profile area only** is enabled by default; when selected, fixes and navaids are filtered to twice the CRC display range around the selected profile center, limited to 80–500 NM. Airways are kept when both endpoints are in that regional navigation set. Only checked categories are read and written. `earth_fix.dat`, `earth_nav.dat`, and `earth_awy.dat` are converted to regional fixes, navaids, and airway records. `CIFP/*.dat` is scanned and its procedure counts are recorded as comments; detailed SID/STAR/approach route conversion requires a dedicated EuroScope procedure mapping. The Custom Data folder is read-only and is never copied or modified. The GUI also includes a live profile search field and larger scrollable profile/sector selectors.
 
 ## Build
 
