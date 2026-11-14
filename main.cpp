@@ -33,6 +33,16 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
+#include <QSettings>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QStyle>
+#include <QButtonGroup>
+#include <QEvent>
+#include <QPainter>
+#include <QPixmap>
+#include <QSvgRenderer>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -1139,217 +1149,462 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    QApplication app(argc, argv);
-    app.setApplicationName("ScopeBridge");
+    // DirectWrite gives smoother, better-spaced text than the legacy GDI engine.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "windows:fontengine=directwrite");
+    QApplication app(argc, argv);    app.setApplicationName("ScopeBridge");
+    app.setOrganizationName("ScopeBridge");
     app.setApplicationVersion(SCOPEBRIDGE_VERSION);
     auto *style = new oclero::qlementine::QlementineStyle(&app);
     QApplication::setStyle(style);
     style->setThemeJsonPath(":/scopebridge/dark.json");
-    QFont interfaceFont("SF Pro Display");
-    if (!QFontDatabase().families().contains("SF Pro Display")) interfaceFont.setFamily("Segoe UI");
-    interfaceFont.setPointSize(10);
+    // Typography: Segoe UI Variable (Windows 11 system font) is hinted for Windows screens and has
+    // real semibold cuts, so small text stays crisp and evenly proportioned. Windows 10 falls back to Segoe UI.
+    const QStringList families = QFontDatabase::families();
+    const bool variable = families.contains("Segoe UI Variable Text");
+    const QString uiFamily = variable ? QString("Segoe UI Variable Text") : QString("Segoe UI");
+    const QString titleFamily = variable && families.contains("Segoe UI Variable Display") ? QString("Segoe UI Variable Display") : uiFamily;
+    auto tune = [](QFont &font) { font.setStyleStrategy(QFont::PreferAntialias); };
+    {
+        auto theme = style->theme();
+        for (QFont *font : {&theme.fontRegular, &theme.fontBold, &theme.fontCaption}) font->setFamily(uiFamily);
+        for (QFont *font : {&theme.fontH1, &theme.fontH2, &theme.fontH3, &theme.fontH4, &theme.fontH5}) font->setFamily(titleFamily);
+        theme.fontBold.setWeight(QFont::Normal);
+        for (QFont *font : {&theme.fontRegular, &theme.fontBold, &theme.fontCaption, &theme.fontH1, &theme.fontH2,
+                            &theme.fontH3, &theme.fontH4, &theme.fontH5, &theme.fontMonospace}) tune(*font);
+        style->setTheme(theme);
+    }
+    QFont interfaceFont(uiFamily);
+    interfaceFont.setPixelSize(13);
+    tune(interfaceFont);
     app.setFont(interfaceFont);
-    app.setStyleSheet(R"(
-        QLabel#title { font-size:28px; font-weight:700; }
-        QLabel#eyebrow { font-size:11px; font-weight:700; color:#78baff; }
-        QLabel#hint { color:#9baec4; }
-        QLabel#version { color:#9baec4; font-size:12px; }
-        QFrame#card { border:1px solid #394455; border-radius:14px; }
-    )");
+    app.setStyleSheet(QString(R"(
+        QLabel#title { font-family:"%1"; font-size:22px; font-weight:600; color:#ffffff; }
+        QLabel#subtitle, QLabel#secondary, QLabel#status { color:#98989d; }
+        QLabel#secondary { font-size:12px; }
+        QLabel#section { font-size:13px; font-weight:600; color:#ffffff; }
+        QLabel#status[state="ok"] { color:#30d158; }
+        QLabel#status[state="warn"] { color:#ff9f0a; }
+        QLabel#status[state="error"] { color:#ff453a; }
+        QLabel#footer { color:#8e8e93; font-size:12px; }
+        QFrame#group { background:#252527; border:1px solid #333336; border-radius:10px; }
+        QFrame#segmented { background:#2c2c2e; border:1px solid #38383b; border-radius:7px; }
+        QPushButton#segment { background:transparent; border:none; border-radius:5px; padding:3px 14px;
+                              color:#d1d1d6; font-size:12px; min-height:18px; }
+        QPushButton#segment:hover:!checked { background:#3a3a3c; }
+        QPushButton#segment:checked { background:#636366; color:#ffffff; }
+    )").arg(titleFamily));
+    QFont logFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    for (const QString &candidate : {"SF Mono", "Cascadia Mono", "Consolas"})
+        if (families.contains(candidate)) { logFont.setFamily(candidate); break; }
+    logFont.setPixelSize(12);
+    tune(logFont);
+
+    QSettings settings;
+    QList<QPair<QString, QLineEdit *>> savedFields;
+    QList<QPair<QString, QCheckBox *>> savedBoxes;
+    struct BusyCursor {
+        BusyCursor() { QApplication::setOverrideCursor(Qt::WaitCursor); }
+        ~BusyCursor() { QApplication::restoreOverrideCursor(); }
+    };
+    auto setStatus = [](QLabel *label, const QString &text, const char *state = "") {
+        label->setText(text);
+        label->setProperty("state", QString::fromLatin1(state));
+        label->style()->unpolish(label); label->style()->polish(label);
+    };
+    auto sectionTitle = [](const QString &text) {
+        auto *label = new QLabel(text); label->setObjectName("section");
+        return label;
+    };
+    auto secondary = [](const QString &text) {
+        auto *label = new QLabel(text); label->setObjectName("secondary"); label->setWordWrap(true);
+        return label;
+    };
+    auto group = [](QVBoxLayout *&inner) {
+        auto *frame = new QFrame; frame->setObjectName("group");
+        inner = new QVBoxLayout(frame); inner->setContentsMargins(16, 12, 16, 14); inner->setSpacing(8);
+        return frame;
+    };
+    auto scrollPage = [](QWidget *content) {
+        auto *scroll = new QScrollArea;
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setStyleSheet("QScrollArea { background: transparent; }");
+        scroll->viewport()->setAutoFillBackground(false);
+        content->setAutoFillBackground(false);
+        scroll->setWidget(content);
+        return scroll;
+    };
+
     QWidget window;
-    window.setWindowTitle("ScopeBridge " SCOPEBRIDGE_VERSION);
-    window.setMinimumSize(980, 760);
-    window.resize(1240, 900);
-    auto *root = new QVBoxLayout(&window); root->setContentsMargins(28, 24, 28, 22); root->setSpacing(16);
-    auto *eyebrow = new QLabel("CRC  /  EUROSCOPE"); eyebrow->setObjectName("eyebrow"); root->addWidget(eyebrow);
-    auto *heading = new QHBoxLayout;
-    auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); heading->addWidget(title);
-    heading->addStretch();
-    auto *version = new QLabel("VERSION " SCOPEBRIDGE_VERSION); version->setObjectName("version"); heading->addWidget(version);
+    window.setWindowTitle("ScopeBridge");
+    window.setMinimumSize(900, 620);
+    if (!window.restoreGeometry(settings.value("window/geometry").toByteArray())) window.resize(1180, 900);
+    auto *root = new QVBoxLayout(&window); root->setContentsMargins(24, 18, 24, 12); root->setSpacing(14);
+
+    // Header: title on the left, segmented control on the right.
+    auto *heading = new QHBoxLayout; heading->setSpacing(16);
+    auto *titleBlock = new QVBoxLayout; titleBlock->setSpacing(2);
+    auto *title = new QLabel("ScopeBridge"); title->setObjectName("title"); titleBlock->addWidget(title);
+    auto *subtitle = new QLabel; subtitle->setObjectName("subtitle"); titleBlock->addWidget(subtitle);
+    heading->addLayout(titleBlock); heading->addStretch();
+    auto *segmented = new QFrame; segmented->setObjectName("segmented");
+    auto *segmentLayout = new QHBoxLayout(segmented); segmentLayout->setContentsMargins(2, 2, 2, 2); segmentLayout->setSpacing(2);
+    auto *modeGroup = new QButtonGroup(&window); modeGroup->setExclusive(true);
+    {
+        int id = 0;
+        for (const QString &text : {QString("CRC → EuroScope"), QString("EuroScope → VRC")}) {
+            auto *button = new QPushButton(text); button->setObjectName("segment");
+            button->setCheckable(true); button->setCursor(Qt::PointingHandCursor); button->setFocusPolicy(Qt::NoFocus);
+            modeGroup->addButton(button, id++); segmentLayout->addWidget(button);
+        }
+    }
+    heading->addWidget(segmented, 0, Qt::AlignVCenter);
     root->addLayout(heading);
-    auto *hint = new QLabel("Build a renderer-ready EuroScope package from a saved CRC display."); hint->setObjectName("hint"); root->addWidget(hint);
-    auto *mode = new QTabBar;
-    mode->addTab("CRC  →  EuroScope");
-    mode->addTab("EuroScope  →  VRC");
-    mode->setExpanding(false);
-    mode->setDrawBase(false);
-    root->addWidget(mode);
     auto *pages = new QStackedWidget; root->addWidget(pages, 1);
-    auto *crcPage = new QWidget; pages->addWidget(crcPage);
-    auto *layout = new QVBoxLayout(crcPage); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(16);
-    const QString local = qEnvironmentVariable("LOCALAPPDATA");
-    auto *sources = new QFrame; sources->setObjectName("card");
-    auto *sourceLayout = new QVBoxLayout(sources); sourceLayout->setContentsMargins(20, 16, 20, 18); sourceLayout->setSpacing(10);
-    auto *sourceTitle = new QLabel("01  /  Source & destination"); sourceLayout->addWidget(sourceTitle);
-    auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignLeft); form->setSpacing(12); sourceLayout->addLayout(form);
-    auto field = [&](const QString &caption, const QString &initial, bool directory, const QString &filter = QString(),
-                     QFormLayout *target = nullptr) {
-        auto *edit = new QLineEdit(initial); auto *row = new QWidget; auto *h = new QHBoxLayout(row);
-        h->setContentsMargins(0, 0, 0, 0); h->addWidget(edit);
-        auto *browse = new QPushButton("Browse"); h->addWidget(browse); (target ? target : form)->addRow(caption, row);
+
+    auto field = [&](const QString &key, const QString &caption, const QString &initial, bool directory,
+                     QFormLayout *target, const QString &filter = QString(), const QString &placeholder = QString()) {
+        auto *edit = new QLineEdit(settings.value("paths/" + key, initial).toString());
+        edit->setPlaceholderText(placeholder);
+        edit->setClearButtonEnabled(true);
+        auto *row = new QWidget; auto *h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0); h->setSpacing(8); h->addWidget(edit, 1);
+        auto *browse = new QPushButton("Choose…"); h->addWidget(browse);
+        target->addRow(caption, row);
         QObject::connect(browse, &QPushButton::clicked, &window, [=, &window] {
-            QString path = directory ? QFileDialog::getExistingDirectory(&window, caption, edit->text())
+            const QString path = directory ? QFileDialog::getExistingDirectory(&window, caption, edit->text())
                 : QFileDialog::getOpenFileName(&window, caption, edit->text(), filter);
-            if (!path.isEmpty()) edit->setText(path);
+            if (!path.isEmpty()) edit->setText(QDir::toNativeSeparators(path));
         });
+        savedFields.append({key, edit});
         return edit;
     };
-    auto *profiles = field("CRC Profiles directory", local + "/CRC/Profiles", true);
-    auto *maps = field("VideoMaps folder", local + "/CRC/VideoMaps", true);
-    auto *sectorDirectory = field("Sector files directory", QDir::homePath(), true);
-    auto *xplane = field("X-Plane Custom Data (optional)", "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Data", true);
-    auto *output = field("Save packages to", QDir::homePath() + "/ScopeBridge-Output", true);
-    layout->addWidget(sources);
-    auto *note = new QLabel("Facility data is detected automatically. Use the VideoMaps root or a single ARTCC folder.");
-    note->setObjectName("hint"); layout->addWidget(note);
-    auto *navTitle = new QLabel("X-Plane navigation import (all disabled by default)");
-    navTitle->setObjectName("hint"); layout->addWidget(navTitle);
-    auto *navOptions = new QHBoxLayout;
-    auto *importFixes = new QCheckBox("Fixes");
-    auto *importNavaids = new QCheckBox("VOR / NDB");
-    auto *importAirways = new QCheckBox("Airways");
-    auto *importProcedures = new QCheckBox("CIFP summary");
-    auto *areaOnly = new QCheckBox("Profile area only"); areaOnly->setChecked(true); areaOnly->setToolTip("Filter fixes and navaids to the selected CRC display center and range.");
-    for (auto *box : {importFixes, importNavaids, importAirways, importProcedures}) navOptions->addWidget(box);
-    navOptions->addWidget(areaOnly);
-    navOptions->addStretch(); layout->addLayout(navOptions);
-    auto *bar = new QHBoxLayout;
-    auto *chooseTitle = new QLabel("02  /  Choose a profile"); bar->addWidget(chooseTitle); bar->addStretch();
-    auto *scan = new QPushButton("Scan profiles"); bar->addWidget(scan); layout->addLayout(bar);
+    auto savedBox = [&](const QString &key, const QString &text, bool initial) {
+        auto *box = new QCheckBox(text);
+        box->setChecked(settings.value("options/" + key, initial).toBool());
+        savedBoxes.append({key, box});
+        return box;
+    };
+    auto makeForm = [] {
+        auto *f = new QFormLayout;
+        f->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        f->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        f->setRowWrapPolicy(QFormLayout::DontWrapRows);
+        f->setHorizontalSpacing(10); f->setVerticalSpacing(6);
+        return f;
+    };
+    auto actionBar = [](QWidget *page, QLabel *statusLabel, QPushButton *primary) {
+        auto *bar = new QHBoxLayout; bar->setSpacing(12);
+        bar->addWidget(statusLabel, 1); bar->addWidget(primary);
+        primary->setMinimumHeight(26); primary->setMinimumWidth(140);
+        auto *outer = qobject_cast<QVBoxLayout *>(page->layout());
+        outer->addLayout(bar);
+    };
+
+    // CRC -> EuroScope page: scrollable content, with the action bar pinned below.
+    auto *crcOuter = new QWidget; pages->addWidget(crcOuter);
+    auto *crcOuterLayout = new QVBoxLayout(crcOuter); crcOuterLayout->setContentsMargins(0, 0, 0, 0); crcOuterLayout->setSpacing(12);
+    auto *crcPage = new QWidget;
+    crcOuterLayout->addWidget(scrollPage(crcPage), 1);
+    auto *layout = new QVBoxLayout(crcPage); layout->setContentsMargins(0, 0, 12, 0); layout->setSpacing(12);
+    const QString local = qEnvironmentVariable("LOCALAPPDATA");
+
+    QVBoxLayout *sourceLayout = nullptr;
+    layout->addWidget(group(sourceLayout));
+    sourceLayout->addWidget(sectionTitle("Sources"));
+    auto *form = makeForm(); sourceLayout->addLayout(form);
+    auto *profiles = field("profiles", "CRC profiles:", QDir::toNativeSeparators(local + "/CRC/Profiles"), true, form);
+    auto *maps = field("videoMaps", "Video maps:", QDir::toNativeSeparators(local + "/CRC/VideoMaps"), true, form);
+    auto *sectorDirectory = field("sectors", "Sector files:", QDir::toNativeSeparators(QDir::homePath()), true, form);
+    auto *output = field("output", "Save to:", QDir::toNativeSeparators(QDir::homePath() + "/ScopeBridge-Output"), true, form);
+    maps->setToolTip("The VideoMaps root, or a single ARTCC folder.");
+    const QString defaultXplane = "D:/SteamLibrary/steamapps/common/X-Plane 12/Custom Data";
+    auto *xplane = field("xplane", "X-Plane data:", QDir(defaultXplane).exists() ? QDir::toNativeSeparators(defaultXplane) : QString(),
+                         true, form, QString(), "Optional – X-Plane Custom Data folder");
+    auto *navRow = new QWidget;
+    auto *navOptions = new QHBoxLayout(navRow); navOptions->setContentsMargins(0, 0, 0, 0); navOptions->setSpacing(16);
+    auto *importFixes = savedBox("fixes", "Fixes", false);
+    auto *importNavaids = savedBox("navaids", "VOR / NDB", false);
+    auto *importAirways = savedBox("airways", "Airways", false);
+    auto *importProcedures = savedBox("cifp", "CIFP summary", false);
+    auto *areaOnly = savedBox("areaOnly", "Profile area only", true);
+    areaOnly->setToolTip("Keep fixes and navaids near the selected CRC display.");
+    for (auto *box : {importFixes, importNavaids, importAirways, importProcedures, areaOnly}) navOptions->addWidget(box);
+    navOptions->addStretch();
+    form->addRow("Import:", navRow);
+    auto *navHint = new QLabel; navHint->setObjectName("secondary"); navHint->setWordWrap(true);
+    form->addRow(QString(), navHint);
+    const QList<QCheckBox *> navCategories{importFixes, importNavaids, importAirways, importProcedures};
+    auto updateNavState = [=] {
+        const QString path = xplane->text().trimmed();
+        const bool valid = !path.isEmpty() && QFileInfo(path).isDir();
+        bool any = false;
+        for (auto *box : navCategories) { box->setEnabled(valid); any = any || box->isChecked(); }
+        areaOnly->setEnabled(valid && any);
+        navHint->setText(path.isEmpty() ? QString()
+                         : !valid ? "The X-Plane folder can’t be found."
+                         : any ? "The X-Plane folder is only read, never modified."
+                               : QString());
+        form->setRowVisible(navHint, !navHint->text().isEmpty());
+    };
+    QObject::connect(xplane, &QLineEdit::textChanged, &window, updateNavState);
+    for (auto *box : navCategories) QObject::connect(box, &QCheckBox::toggled, &window, updateNavState);
+    updateNavState();
+
     auto *panels = new QSplitter(Qt::Horizontal);
     panels->setChildrenCollapsible(false);
-    auto *profilePanel = new QWidget;
-    auto *profileLayout = new QVBoxLayout(profilePanel);
-    profileLayout->setContentsMargins(0, 0, 6, 0);
-    auto *profileCount = new QLabel("Scan the directory to find saved profiles.");
-    profileCount->setObjectName("hint"); profileLayout->addWidget(profileCount);
+    panels->setHandleWidth(12);
+    panels->setMinimumHeight(320);
+    QVBoxLayout *profileLayout = nullptr;
+    auto *profilePanel = group(profileLayout);
+    auto *profileBar = new QHBoxLayout;
+    auto *profileCount = secondary(QString()); profileCount->setWordWrap(false);
+    profileBar->addWidget(sectionTitle("Profiles")); profileBar->addWidget(profileCount); profileBar->addStretch();
+    auto *scan = new QPushButton("Scan"); profileBar->addWidget(scan);
+    profileLayout->addLayout(profileBar);
     auto *profileSearch = new QLineEdit;
-    profileSearch->setPlaceholderText("Search profiles...");
+    profileSearch->setPlaceholderText("Search");
+    profileSearch->setClearButtonEnabled(true);
     profileLayout->addWidget(profileSearch);
     auto *profileList = new QListWidget;
     profileList->setSelectionMode(QAbstractItemView::SingleSelection);
-    profileList->setAlternatingRowColors(true);
+    profileList->setToolTip("Double-click to generate.");
+    profileList->setMinimumHeight(90);
     profileLayout->addWidget(profileList, 1);
-    auto *sectorLabel = new QLabel("Base sector (optional)");
-    profileLayout->addWidget(sectorLabel);
+    auto *sectorBar = new QHBoxLayout;
+    auto *sectorOptional = secondary("Optional"); sectorOptional->setWordWrap(false);
+    sectorOptional->setToolTip("Keeps navigation, airports and runways from an existing EuroScope sector.");
+    sectorBar->addWidget(sectionTitle("Base Sector")); sectorBar->addWidget(sectorOptional); sectorBar->addStretch();
+    auto *clearSector = new QPushButton("Clear"); clearSector->setEnabled(false); sectorBar->addWidget(clearSector);
+    profileLayout->addSpacing(4);
+    profileLayout->addLayout(sectorBar);
     auto *sectorList = new QListWidget;
     sectorList->setSelectionMode(QAbstractItemView::SingleSelection);
-    sectorList->setAlternatingRowColors(true);
-    sectorList->setMaximumHeight(130);
+    sectorList->setMinimumHeight(72);
+    sectorList->setMaximumHeight(120);
     profileLayout->addWidget(sectorList);
     panels->addWidget(profilePanel);
-    auto *mapPanel = new QWidget;
-    auto *mapLayout = new QVBoxLayout(mapPanel);
-    mapLayout->setContentsMargins(6, 0, 0, 0);
+
+    QVBoxLayout *mapLayout = nullptr;
+    auto *mapPanel = group(mapLayout);
     auto *mapBar = new QHBoxLayout;
-    mapBar->addWidget(new QLabel("03  /  Video maps")); mapBar->addStretch();
-    auto *refresh = new QPushButton("Refresh maps"); mapBar->addWidget(refresh);
+    mapBar->addWidget(sectionTitle("Video Maps")); mapBar->addStretch();
+    auto *refresh = new QPushButton("Refresh"); refresh->setEnabled(false); mapBar->addWidget(refresh);
     mapLayout->addLayout(mapBar);
-    auto *table = new QTableWidget(0, 2); table->setHorizontalHeaderLabels({"Video map / default visibility", "CRC ID"});
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    table->setAlternatingRowColors(true);
+    auto *mapSummary = secondary("Select a profile to see its video maps.");
+    mapLayout->addWidget(mapSummary);
+    auto *table = new QTableWidget(0, 3); table->setHorizontalHeaderLabels({"Visible", "Name", "CRC ID"});
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    table->setColumnWidth(2, 130);
+    table->setTextElideMode(Qt::ElideMiddle);
+    table->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    table->horizontalHeader()->setHighlightSections(false);
+    table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);  // keep the profile's own order until the user sorts
+    table->verticalHeader()->setVisible(false);
+    table->verticalHeader()->setDefaultSectionSize(24);
+    table->setShowGrid(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers); mapLayout->addWidget(table, 1);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setWordWrap(false);
+    mapLayout->addWidget(table, 1);
+    auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setFont(logFont);
+    log->setMinimumHeight(56); log->setMaximumHeight(88);
+    log->setPlaceholderText("Messages appear here.");
+    mapLayout->addWidget(log);
     panels->addWidget(mapPanel);
     panels->setStretchFactor(0, 1);
     panels->setStretchFactor(1, 2);
-    panels->setSizes({470, 740});
+    if (!panels->restoreState(settings.value("window/splitter").toByteArray())) panels->setSizes({400, 740});
     layout->addWidget(panels, 1);
-    auto *log = new QPlainTextEdit; log->setReadOnly(true); log->setMaximumHeight(110); layout->addWidget(log);
-    auto *actions = new QHBoxLayout; auto *status = new QLabel("Scan a Profiles directory to begin."); status->setObjectName("hint");
-    auto *generate = new QPushButton("Generate EuroScope sector"); generate->setObjectName("primary");
+
+    auto *status = new QLabel("Scan your CRC profiles to begin."); status->setObjectName("status"); status->setWordWrap(true);
+    auto *generate = new QPushButton("Generate Package");
     generate->setEnabled(false);
     generate->setDefault(true);
-    actions->addWidget(status, 1); actions->addWidget(generate); layout->addLayout(actions);
-    auto *licenseNotice = new QLabel("GPLv3 · No warranty · <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">License</a> · UI powered by Qlementine (MIT)");
-    licenseNotice->setObjectName("hint"); licenseNotice->setOpenExternalLinks(true); root->addWidget(licenseNotice);
+    actionBar(crcOuter, status, generate);
+
     // EuroScope -> VRC page.
-    auto *vrcPage = new QWidget; pages->addWidget(vrcPage);
-    auto *vrcLayout = new QVBoxLayout(vrcPage); vrcLayout->setContentsMargins(0, 0, 0, 0); vrcLayout->setSpacing(16);
-    auto *vrcCard = new QFrame; vrcCard->setObjectName("card");
-    auto *vrcCardLayout = new QVBoxLayout(vrcCard); vrcCardLayout->setContentsMargins(20, 16, 20, 18); vrcCardLayout->setSpacing(10);
-    vrcCardLayout->addWidget(new QLabel("01  /  EuroScope sector & destination"));
-    auto *vrcForm = new QFormLayout; vrcForm->setLabelAlignment(Qt::AlignLeft); vrcForm->setSpacing(12); vrcCardLayout->addLayout(vrcForm);
-    auto *esSector = field("EuroScope sector (.sct)", QString(), false, "EuroScope sector (*.sct *.sct2);;All files (*)", vrcForm);
-    auto *esExtension = field("EuroScope extension (.ese, optional)", QString(), false, "EuroScope extension (*.ese);;All files (*)", vrcForm);
-    auto *vrcOutput = field("Save VRC sector to", QDir::homePath() + "/ScopeBridge-VRC", true, QString(), vrcForm);
-    vrcLayout->addWidget(vrcCard);
-    auto *vrcNote = new QLabel("Writes a VRC .sct2: colors become #define names, GEO names become comments, REGIONNAME lines are removed,\n"
-                               "fix/navaid names are resolved to coordinates and non-ASCII text is replaced. Source files are never changed.");
-    vrcNote->setObjectName("hint"); vrcLayout->addWidget(vrcNote);
-    auto *vrcOptionsTitle = new QLabel("02  /  .ese content"); vrcLayout->addWidget(vrcOptionsTitle);
-    auto *vrcOptionRow = new QHBoxLayout;
-    auto *useFreetext = new QCheckBox("FREETEXT → labels"); useFreetext->setChecked(true);
-    auto *useSectorLines = new QCheckBox("SECTORLINE → ARTCC LOW"); useSectorLines->setChecked(true);
-    auto *usePositions = new QCheckBox("POSITIONS → .pof"); usePositions->setChecked(true);
+    auto *vrcOuter = new QWidget; pages->addWidget(vrcOuter);
+    auto *vrcOuterLayout = new QVBoxLayout(vrcOuter); vrcOuterLayout->setContentsMargins(0, 0, 0, 0); vrcOuterLayout->setSpacing(12);
+    auto *vrcPage = new QWidget;
+    vrcOuterLayout->addWidget(scrollPage(vrcPage), 1);
+    auto *vrcLayout = new QVBoxLayout(vrcPage); vrcLayout->setContentsMargins(0, 0, 12, 0); vrcLayout->setSpacing(12);
+    QVBoxLayout *vrcCardLayout = nullptr;
+    vrcLayout->addWidget(group(vrcCardLayout));
+    vrcCardLayout->addWidget(sectionTitle("Files"));
+    auto *vrcForm = makeForm(); vrcCardLayout->addLayout(vrcForm);
+    auto *esSector = field("esSector", "Sector (.sct):", QString(), false, vrcForm,
+                           "EuroScope sector (*.sct *.sct2);;All files (*)", "EuroScope sector file");
+    auto *esExtension = field("esExtension", "Extension (.ese):", QString(), false, vrcForm,
+                              "EuroScope extension (*.ese);;All files (*)", "Optional – found automatically");
+    auto *vrcOutput = field("vrcOutput", "Save to:", QDir::toNativeSeparators(QDir::homePath() + "/ScopeBridge-VRC"), true, vrcForm);
+    vrcCardLayout->addWidget(secondary("Creates a VRC .sct2. Colors become #define names, fix and navaid names are resolved "
+                                       "to coordinates, and non‑ASCII text is replaced. Source files are never changed."));
+    QVBoxLayout *vrcOptionsLayout = nullptr;
+    vrcLayout->addWidget(group(vrcOptionsLayout));
+    vrcOptionsLayout->addWidget(sectionTitle("Include from .ese"));
+    auto *vrcOptionRow = new QHBoxLayout; vrcOptionRow->setSpacing(16);
+    auto *useFreetext = savedBox("vrcFreetext", "Free text as labels", true);
+    auto *useSectorLines = savedBox("vrcSectorLines", "Sector lines as ARTCC LOW", true);
+    auto *usePositions = savedBox("vrcPositions", "Positions as .pof", true);
     for (auto *box : {useFreetext, useSectorLines, usePositions}) vrcOptionRow->addWidget(box);
-    vrcOptionRow->addStretch(); vrcLayout->addLayout(vrcOptionRow);
-    auto *vrcLog = new QPlainTextEdit; vrcLog->setReadOnly(true);
-    vrcLog->setPlainText("Choose a EuroScope .sct file. A .ese file with the same name is picked up automatically.");
-    vrcLayout->addWidget(vrcLog, 1);
-    auto *vrcActions = new QHBoxLayout;
-    auto *vrcStatus = new QLabel("No sector selected."); vrcStatus->setObjectName("hint");
-    auto *vrcGenerate = new QPushButton("Generate VRC sector"); vrcGenerate->setObjectName("primary");
-    vrcActions->addWidget(vrcStatus, 1); vrcActions->addWidget(vrcGenerate); vrcLayout->addLayout(vrcActions);
-    QObject::connect(esSector, &QLineEdit::textChanged, &window, [=](const QString &path) {
-        const QFileInfo info(path);
+    vrcOptionRow->addStretch(); vrcOptionsLayout->addLayout(vrcOptionRow);
+    QVBoxLayout *vrcLogLayout = nullptr;
+    vrcLayout->addWidget(group(vrcLogLayout), 1);
+    vrcLogLayout->addWidget(sectionTitle("Results"));
+    auto *vrcLog = new QPlainTextEdit; vrcLog->setReadOnly(true); vrcLog->setFont(logFont);
+    vrcLog->setMinimumHeight(140);
+    vrcLog->setPlaceholderText("Choose a .sct file. A matching .ese next to it is picked up automatically.");
+    vrcLogLayout->addWidget(vrcLog, 1);
+    auto *vrcStatus = new QLabel("No sector selected."); vrcStatus->setObjectName("status"); vrcStatus->setWordWrap(true);
+    auto *vrcGenerate = new QPushButton("Convert");
+    vrcGenerate->setDefault(true);
+    actionBar(vrcOuter, vrcStatus, vrcGenerate);
+
+    // Footer: GitHub mark, link to the repository, version.
+    const QString repositoryUrl = "https://github.com/lpxlpx7/ScopeBridge";
+    auto *footer = new QHBoxLayout; footer->setSpacing(6);
+    auto *githubIcon = new QLabel;
+    {
+        const qreal ratio = window.devicePixelRatioF();
+        QPixmap pixmap(QSize(16, 16) * ratio); pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QSvgRenderer(QString(":/scopebridge/github.svg")).render(&painter);
+        painter.end();
+        pixmap.setDevicePixelRatio(ratio);
+        githubIcon->setPixmap(pixmap);
+    }
+    githubIcon->setCursor(Qt::PointingHandCursor);
+    githubIcon->setToolTip(repositoryUrl);
+    struct ClickToOpen : QObject {
+        QUrl url;
+        ClickToOpen(const QUrl &u, QObject *parent) : QObject(parent), url(u) {}
+        bool eventFilter(QObject *, QEvent *event) override {
+            if (event->type() != QEvent::MouseButtonRelease) return false;
+            QDesktopServices::openUrl(url); return true;
+        }
+    };
+    githubIcon->installEventFilter(new ClickToOpen(QUrl(repositoryUrl), githubIcon));
+    auto *githubLink = new QLabel(QString("Open source on <a style='color:#0a84ff; text-decoration:none' href=\"%1\">GitHub</a>").arg(repositoryUrl));
+    githubLink->setObjectName("footer"); githubLink->setOpenExternalLinks(true); githubLink->setToolTip(repositoryUrl);
+    auto *versionLabel = new QLabel("Version " SCOPEBRIDGE_VERSION); versionLabel->setObjectName("footer");
+    footer->addWidget(githubIcon); footer->addWidget(githubLink); footer->addStretch(); footer->addWidget(versionLabel);
+    root->addLayout(footer);
+
+    auto updateVrcState = [=](bool pickExtension) {
+        const QFileInfo info(esSector->text().trimmed());
         const QString sibling = info.dir().filePath(info.completeBaseName() + ".ese");
-        if (info.isFile() && QFileInfo::exists(sibling)) esExtension->setText(QDir::toNativeSeparators(sibling));
-        vrcStatus->setText(info.isFile() ? "Ready: " + info.fileName() : "No sector selected.");
-    });
+        if (pickExtension && info.isFile() && QFileInfo::exists(sibling)) esExtension->setText(QDir::toNativeSeparators(sibling));
+        vrcGenerate->setEnabled(info.isFile());
+        if (info.isFile()) setStatus(vrcStatus, "Ready to convert " + info.fileName() + ".");
+        else if (esSector->text().trimmed().isEmpty()) setStatus(vrcStatus, "No sector selected.");
+        else setStatus(vrcStatus, "The sector file can’t be found.", "warn");
+    };
+    QObject::connect(esSector, &QLineEdit::textChanged, &window, [=] { updateVrcState(true); });
+    updateVrcState(false);
     QObject::connect(vrcGenerate, &QPushButton::clicked, &window, [=, &window] {
         try {
             VrcOptions options;
             options.freetext = useFreetext->isChecked();
             options.sectorLines = useSectorLines->isChecked();
             options.positions = usePositions->isChecked();
-            const auto result = esToVrc(esSector->text().trimmed(), esExtension->text().trimmed(), vrcOutput->text().trimmed(), options);
+            VrcResult result;
+            { BusyCursor busy; setStatus(vrcStatus, "Converting…"); QApplication::processEvents();
+              result = esToVrc(esSector->text().trimmed(), esExtension->text().trimmed(), vrcOutput->text().trimmed(), options); }
             QStringList lines{"Sector: " + QDir::toNativeSeparators(result.sector)};
             if (!result.pof.isEmpty()) lines << "Positions: " + QDir::toNativeSeparators(result.pof);
             lines << "" << result.summary;
             if (!result.warnings.isEmpty()) lines << "" << result.warnings;
             vrcLog->setPlainText(lines.join('\n'));
-            vrcStatus->setText(QString("Generated %1").arg(QFileInfo(result.sector).fileName()));
-            QMessageBox::information(&window, "VRC sector generated", "VRC files were created in:\n" + QFileInfo(result.sector).absolutePath());
+            const QString name = QFileInfo(result.sector).fileName();
+            if (result.warnings.isEmpty()) setStatus(vrcStatus, "Created " + name + ".", "ok");
+            else setStatus(vrcStatus, QString("Created %1 with %2 warning(s).").arg(name).arg(result.warnings.size()), "warn");
+            QMessageBox::information(&window, "Conversion Complete", "The VRC files were saved to:\n" + QDir::toNativeSeparators(QFileInfo(result.sector).absolutePath()));
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(result.sector).absolutePath()));
-        } catch (const QString &e) { QMessageBox::critical(&window, "Conversion failed", e); vrcLog->setPlainText(e); }
+        } catch (const QString &e) {
+            setStatus(vrcStatus, "Conversion failed.", "error");
+            QMessageBox::critical(&window, "Conversion Failed", e); vrcLog->setPlainText(e);
+        }
     });
-    QObject::connect(mode, &QTabBar::currentChanged, &window, [=](int index) {
+    auto setMode = [=](int index) {
+        if (auto *button = modeGroup->button(index)) button->setChecked(true);
         pages->setCurrentIndex(index);
-        eyebrow->setText(index == 0 ? "CRC  /  EUROSCOPE" : "EUROSCOPE  /  VRC");
-        hint->setText(index == 0 ? "Build a renderer-ready EuroScope package from a saved CRC display."
-                                 : "Convert a EuroScope sector (.sct + .ese) into a VRC sector file (.sct2).");
-    });
+        subtitle->setText(index == 0 ? "Build a EuroScope package from a saved CRC display."
+                                     : "Convert a EuroScope sector into a VRC sector file.");
+    };
+    QObject::connect(modeGroup, &QButtonGroup::idClicked, &window, setMode);
+    setMode(qBound(0, settings.value("window/tab", 0).toInt(), 1));
+
     auto preview = [&]() -> Profile {
         auto *selected = profileList->currentItem();
         if (!selected) throw QString("Select a profile from the list first.");
+        table->setSortingEnabled(false);
         table->setRowCount(0);
-        const Profile p = inspect(selected->data(Qt::UserRole).toString(), maps->text());
+        Profile p;
+        { BusyCursor busy; p = inspect(selected->data(Qt::UserRole).toString(), maps->text().trimmed()); }
         int active = 0;
         for (const auto &map : p.maps) if (map.selected) ++active;
-        status->setText(QString("%1 · %2 · %3 active / %4 available maps").arg(p.artcc, p.facility).arg(active).arg(p.maps.size()));
-        log->setPlainText(p.warnings.isEmpty() ? "Profile resolved successfully." : p.warnings.join("\n"));
+        setStatus(status, QString("%1 · %2").arg(p.artcc, p.facility), p.warnings.isEmpty() ? "" : "warn");
+        mapSummary->setText(QString("%1 of %2 maps visible by default.").arg(active).arg(p.maps.size()));
+        log->setPlainText(p.warnings.isEmpty() ? "Profile loaded." : p.warnings.join("\n"));
         for (const auto &map : p.maps) {
-            int r = table->rowCount(); table->insertRow(r);
-            auto *item = new QTableWidgetItem((map.selected ? "ON   " : "OFF  ") + map.name);
-            item->setToolTip(map.source);
-            table->setItem(r, 0, item);
-            table->setItem(r, 1, new QTableWidgetItem(map.id));
+            const int r = table->rowCount(); table->insertRow(r);
+            auto *state = new QTableWidgetItem(map.selected ? "●  On" : "○  Off");
+            state->setForeground(map.selected ? QColor("#30d158") : QColor("#8e8e93"));
+            table->setItem(r, 0, state);
+            auto *name = new QTableWidgetItem(map.name); name->setToolTip(map.source);
+            if (!map.selected) name->setForeground(QColor("#aeaeb2"));
+            table->setItem(r, 1, name);
+            auto *id = new QTableWidgetItem(map.id); id->setForeground(QColor("#8e8e93")); id->setToolTip(map.id);
+            table->setItem(r, 2, id);
         }
+        table->setSortingEnabled(true);
         return p;
+    };
+    auto resetProfiles = [&](const QString &message) {
+        profileList->clear(); table->setSortingEnabled(false); table->setRowCount(0);
+        profileCount->setText(QString());
+        mapSummary->setText("Select a profile to see its video maps.");
+        generate->setEnabled(false); refresh->setEnabled(false);
+        setStatus(status, message);
+    };
+    auto loadSectors = [&] {
+        sectorList->clear(); clearSector->setEnabled(false);
+        const QDir sectorDir(sectorDirectory->text().trimmed());
+        if (sectorDirectory->text().trimmed().isEmpty() || !sectorDir.exists()) return;
+        for (const auto &file : sectorDir.entryInfoList({"*.sct"}, QDir::Files | QDir::Readable, QDir::Name)) {
+            auto *item = new QListWidgetItem(file.fileName());
+            item->setData(Qt::UserRole, file.absoluteFilePath());
+            item->setToolTip(QDir::toNativeSeparators(file.absoluteFilePath()));
+            sectorList->addItem(item);
+        }
+    };
+    auto filterProfiles = [&](const QString &query) {
+        int visible = 0;
+        for (int i = 0; i < profileList->count(); ++i) {
+            auto *item = profileList->item(i);
+            const bool match = item->text().contains(query, Qt::CaseInsensitive) || item->toolTip().contains(query, Qt::CaseInsensitive);
+            item->setHidden(!match);
+            if (match) ++visible;
+        }
+        if (profileList->count() > 0)
+            profileCount->setText(query.isEmpty() ? QString("%1 profiles").arg(profileList->count())
+                                                  : QString("%1 of %2 profiles").arg(visible).arg(profileList->count()));
     };
     QObject::connect(scan, &QPushButton::clicked, &window, [&] {
         QSignalBlocker blocked(profileList);
-        profileList->clear(); sectorList->clear(); table->setRowCount(0);
-        generate->setEnabled(false);
+        resetProfiles("Scanning…");
         QStringList errors;
         QList<ProfileEntry> entries;
-        try { entries = scanProfiles(profiles->text(), errors); }
+        try { BusyCursor busy; entries = scanProfiles(profiles->text().trimmed(), errors); }
         catch (const QString &e) {
-            profileCount->setText("Directory not found.");
+            profileCount->setText(QString());
             log->setPlainText(e);
-            status->setText("No profiles available.");
+            setStatus(status, "No profiles found.", "error");
             return;
         }
         for (const auto &entry : entries) {
@@ -1357,49 +1612,49 @@ int main(int argc, char **argv) {
             item->setData(Qt::UserRole, entry.path);
             item->setToolTip(entry.artcc.isEmpty() ? entry.name : entry.artcc + "  /  " + entry.name);
             profileList->addItem(item);
-            item->setHidden(!entry.name.contains(profileSearch->text(), Qt::CaseInsensitive));
         }
-        const QDir sectorDir(sectorDirectory->text());
-        for (const auto &file : sectorDir.entryInfoList({"*.sct"}, QDir::Files | QDir::Readable, QDir::Name)) {
-            auto *item = new QListWidgetItem(file.fileName());
-            item->setData(Qt::UserRole, file.absoluteFilePath());
-            item->setToolTip(file.absoluteFilePath());
-            sectorList->addItem(item);
-        }
-        profileCount->setText(QString("%1 profile(s) found").arg(entries.size()));
-        log->setPlainText(errors.isEmpty() ? "Select a profile to preview its video maps."
+        loadSectors();
+        filterProfiles(profileSearch->text());
+        if (entries.isEmpty()) profileCount->setText(QString());
+        log->setPlainText(errors.isEmpty() ? QString()
                                             : QString("Skipped %1 invalid file(s):\n").arg(errors.size()) + errors.join("\n"));
-        status->setText(entries.isEmpty() ? "No named profiles found." : "Select a profile to continue.");
+        if (entries.isEmpty()) setStatus(status, "No named profiles found.", "warn");
+        else setStatus(status, "Select a profile.");
     });
-    QObject::connect(profileSearch, &QLineEdit::textChanged, &window, [=](const QString &query) {
-        for (int i = 0; i < profileList->count(); ++i)
-            profileList->item(i)->setHidden(!profileList->item(i)->text().contains(query, Qt::CaseInsensitive));
+    QObject::connect(profileSearch, &QLineEdit::textChanged, &window, filterProfiles);
+    auto *findShortcut = new QShortcut(QKeySequence::Find, &window);
+    QObject::connect(findShortcut, &QShortcut::activated, &window, [&] {
+        setMode(0); profileSearch->setFocus(); profileSearch->selectAll();
     });
     QObject::connect(profiles, &QLineEdit::textChanged, &window, [&] {
-        profileList->clear(); sectorList->clear(); table->setRowCount(0);
-        profileCount->setText("Scan the directory to find saved profiles.");
-        generate->setEnabled(false);
-        status->setText("Scan the selected Profiles directory.");
+        sectorList->clear(); clearSector->setEnabled(false);
+        resetProfiles("Scan the selected folder.");
     });
-    QObject::connect(sectorDirectory, &QLineEdit::textChanged, &window, [&] {
-        sectorList->clear();
+    QObject::connect(sectorDirectory, &QLineEdit::textChanged, &window, [&] { loadSectors(); });
+    QObject::connect(sectorList, &QListWidget::currentItemChanged, &window, [&](QListWidgetItem *current) {
+        clearSector->setEnabled(current != nullptr);
+    });
+    QObject::connect(clearSector, &QPushButton::clicked, &window, [&] {
+        sectorList->clearSelection(); sectorList->setCurrentItem(nullptr);
     });
     QObject::connect(profileList, &QListWidget::currentItemChanged, &window, [&](QListWidgetItem *current) {
         generate->setEnabled(current != nullptr);
+        refresh->setEnabled(current != nullptr);
         if (!current) { table->setRowCount(0); return; }
         try { preview(); }
-        catch (const QString &e) { table->setRowCount(0); status->setText("Unable to preview maps."); log->setPlainText(e); }
+        catch (const QString &e) { table->setRowCount(0); setStatus(status, "Couldn’t load this profile.", "error"); log->setPlainText(e); }
     });
     QObject::connect(refresh, &QPushButton::clicked, &window, [&] {
         try { preview(); }
-        catch (const QString &e) { status->setText("Cannot preview maps."); log->setPlainText(e); }
+        catch (const QString &e) { setStatus(status, "Couldn’t load the video maps.", "error"); log->setPlainText(e); }
     });
     QObject::connect(generate, &QPushButton::clicked, &window, [&] {
         try {
             const auto p = preview();
             const QString baseSector = sectorList->currentItem()
                 ? sectorList->currentItem()->data(Qt::UserRole).toString() : QString();
-            XPlaneOptions navOptionsValue{importFixes->isChecked(), importNavaids->isChecked(), importAirways->isChecked(), importProcedures->isChecked()};
+            auto use = [](QCheckBox *box) { return box->isEnabled() && box->isChecked(); };
+            XPlaneOptions navOptionsValue{use(importFixes), use(importNavaids), use(importAirways), use(importProcedures)};
             const auto view = p.view;
             auto center = view.value("Center").toObject();
             if (center.isEmpty()) center = view.value("CurrentPrefSet").toObject().value("DisplayCenter").toObject();
@@ -1407,13 +1662,30 @@ int main(int argc, char **argv) {
             navOptionsValue.centerLat = center.value("Lat").toDouble(35);
             navOptionsValue.centerLon = center.value("Lon").toDouble(-90);
             navOptionsValue.rangeNm = view.value("Range").toDouble(view.value("CurrentPrefSet").toObject().value("Range").toDouble(100));
-            const auto result = convert(p, output->text(), baseSector, xplane->text(), navOptionsValue);
-            const QString path = QDir(output->text()).filePath(safe(p.artcc + "_" + p.name));
-            status->setText(QString("Generated %1 maps · %2 segments").arg(result.maps).arg(result.segments));
+            const QString destination = output->text().trimmed();
+            Result result;
+            { BusyCursor busy; setStatus(status, "Generating…"); QApplication::processEvents();
+              result = convert(p, destination, baseSector, xplane->text().trimmed(), navOptionsValue); }
+            const QString path = QDir::toNativeSeparators(QDir(destination).filePath(safe(p.artcc + "_" + p.name)));
+            const QString summary = QString("%1 maps, %2 segments").arg(result.maps).arg(result.segments);
+            if (result.warnings.isEmpty()) setStatus(status, "Done. " + summary + ".", "ok");
+            else setStatus(status, QString("Done with %1 warning(s). %2.").arg(result.warnings.size()).arg(summary), "warn");
             log->setPlainText("Package: " + path + (result.warnings.isEmpty() ? "" : "\n" + result.warnings.join("\n")));
-            QMessageBox::information(&window, "Package generated", "EuroScope files were created in:\n" + path);
+            QMessageBox::information(&window, "Package Created", "The EuroScope files were saved to:\n" + path);
             QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-        } catch (const QString &e) { QMessageBox::critical(&window, "Conversion failed", e); log->setPlainText(e); }
+        } catch (const QString &e) {
+            setStatus(status, "Generation failed.", "error");
+            QMessageBox::critical(&window, "Generation Failed", e); log->setPlainText(e);
+        }
+    });
+    QObject::connect(profileList, &QListWidget::itemDoubleClicked, &window, [&] { if (generate->isEnabled()) generate->click(); });
+    loadSectors();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &window, [&] {
+        for (const auto &[key, edit] : savedFields) settings.setValue("paths/" + key, edit->text().trimmed());
+        for (const auto &[key, box] : savedBoxes) settings.setValue("options/" + key, box->isChecked());
+        settings.setValue("window/geometry", window.saveGeometry());
+        settings.setValue("window/splitter", panels->saveState());
+        settings.setValue("window/tab", modeGroup->checkedId());
     });
     auto *updates = new QNetworkAccessManager(&window);
     QTimer::singleShot(1800, &window, [updates, &window] {

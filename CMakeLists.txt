@@ -13,4 +13,4 @@ FetchContent_Declare(qlementine
 FetchContent_MakeAvailable(qlementine)
 qt_add_executable(ScopeBridge WIN32 main.cpp resources.qrc)
 target_compile_definitions(ScopeBridge PRIVATE SCOPEBRIDGE_VERSION="${PROJECT_VERSION}")
-target_link_libraries(ScopeBridge PRIVATE Qt6::Core Qt6::Widgets Qt6::Network qlementine)
+target_link_libraries(ScopeBridge PRIVATE Qt6::Core Qt6::Widgets Qt6::Network Qt6::Svg qlementine)

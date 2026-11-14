@@ -1,5 +1,6 @@
 <RCC>
   <qresource prefix="/scopebridge">
     <file alias="dark.json">theme/dark.json</file>
+    <file alias="github.svg">theme/github.svg</file>
   </qresource>
 </RCC>
